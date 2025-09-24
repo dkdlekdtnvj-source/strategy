@@ -101,15 +101,23 @@ var int barsInPos = 0
 var float baseRisk = na
 var float activeTp1Pct = na
 var float activeTp2Pct = na
-var bool guardExitTriggered = false
-var bool kasaExitTriggered = false
-var bool timeStopTriggered = false
-var bool eodExitTriggered = false
+var bool guardExitLongTriggered = false
+var bool guardExitShortTriggered = false
+var bool kasaExitLongTriggered = false
+var bool kasaExitShortTriggered = false
+var bool timeStopLongTriggered = false
+var bool timeStopShortTriggered = false
+var bool eodExitLongTriggered = false
+var bool eodExitShortTriggered = false
 
-guardExitTriggered := false
-kasaExitTriggered := false
-timeStopTriggered := false
-eodExitTriggered := false
+guardExitLongTriggered := false
+guardExitShortTriggered := false
+kasaExitLongTriggered := false
+kasaExitShortTriggered := false
+timeStopLongTriggered := false
+timeStopShortTriggered := false
+eodExitLongTriggered := false
+eodExitShortTriggered := false
 
 if barstate.isconfirmed
     newProfit = strategy.netprofit - nz(strategy.netprofit[1])
@@ -263,8 +271,23 @@ if useGuardExit and strategy.position_size != 0
     preemptPrice = guardDirection == 1 ? liqPrice + preemptTicks * tickSize : liqPrice - preemptTicks * tickSize
     hitGuard = guardDirection == 1 ? low <= preemptPrice : high >= preemptPrice
     if hitGuard
-        guardExitTriggered := true
+        if guardDirection == 1
+            guardExitLongTriggered := true
+        else
+            guardExitShortTriggered := true
         guardFiredTotal += 1
+        entryPrice := na
+        stopLoss := na
+        baseRisk := na
+        riskR := na
+        tp1Price := na
+        tp2Price := na
+        lock1R := false
+        lock2R := false
+        activeTp1Pct := na
+        activeTp2Pct := na
+        dynAtrMult := na
+        barsInPos := 0
 
 stop_by_losses = maxDailyLosses > 0 and dailyLosses >= maxDailyLosses
 stop_by_dd = maxWeeklyDD > 0 and weeklyDD >= maxWeeklyDD
@@ -289,6 +312,10 @@ htfRsiLen = input.int(21, "상위봉 RSI 길이", minval=5, maxval=50, group=gro
 
 htfRsiSeries = request.security(syminfo.tickerid, htfTf, ta.rsi(close, htfRsiLen))
 htfRsi = htfRsiSeries[1]
+
+f_getAdx(_len) =>
+    dmiResult = ta.dmi(_len, _len)
+    dmiResult.adx
 
 useVWAPFilter = input.bool(true, "VWAP 필터 사용", group=groupContext)
 vwap = ta.vwap
@@ -364,9 +391,9 @@ htfEmaSeriesLong = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEm
 htfEmaLong = htfEmaSeriesLong[1]
 htfEmaSeriesShort = useAsymLogic and htfEmaLenShort != htfEmaLenLong ? request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLenShort)) : htfEmaSeriesLong
 htfEmaShort = htfEmaSeriesShort[1]
-htfAdxSeriesLong = request.security(syminfo.tickerid, htfTf, ta.adx(htfAdxLenLong))
+htfAdxSeriesLong = request.security(syminfo.tickerid, htfTf, f_getAdx(htfAdxLenLong))
 htfAdxLong = htfAdxSeriesLong[1]
-htfAdxSeriesShort = useAsymLogic and htfAdxLenShort != htfAdxLenLong ? request.security(syminfo.tickerid, htfTf, ta.adx(htfAdxLenShort)) : htfAdxSeriesLong
+htfAdxSeriesShort = useAsymLogic and htfAdxLenShort != htfAdxLenLong ? request.security(syminfo.tickerid, htfTf, f_getAdx(htfAdxLenShort)) : htfAdxSeriesLong
 htfAdxShort = htfAdxSeriesShort[1]
 
 microTrendLong = not useMicroTrend or emaFastLong > emaSlowLong
@@ -558,7 +585,7 @@ tp1SplitShort = useDynScaleOut ? f_dynPct(signalScoreShort, tp1Pct) : tp1Pct
 // ─────────────────────────────────────────────────────────────────────────────
 // I) Order Handling & Trade Management
 // ─────────────────────────────────────────────────────────────────────────────
-resetTradeState() =>
+if strategy.position_size == 0
     entryPrice := na
     stopLoss := na
     riskR := na
@@ -572,8 +599,6 @@ resetTradeState() =>
     activeTp2Pct := na
     barsInPos := 0
 
-if strategy.position_size == 0
-    resetTradeState()
     if entry_long and not (stop_by_losses or stop_by_dd or stop_by_guard or stop_by_streak or stop_by_perf or stop_by_profit)
         entryPrice := close
         stopLoss := entryPrice - atrStop * smartStopMult
@@ -671,8 +696,34 @@ if strategy.position_size != 0
             stopLoss := math.min(stopLoss, entryAvg)
             lock1R := true
 
-    if (inLong and kasa_exitLong) or (inShort and kasa_exitShort)
-        kasaExitTriggered := true
+    if inLong and kasa_exitLong
+        kasaExitLongTriggered := true
+        entryPrice := na
+        stopLoss := na
+        baseRisk := na
+        riskR := na
+        tp1Price := na
+        tp2Price := na
+        lock1R := false
+        lock2R := false
+        activeTp1Pct := na
+        activeTp2Pct := na
+        dynAtrMult := na
+        barsInPos := 0
+    if inShort and kasa_exitShort
+        kasaExitShortTriggered := true
+        entryPrice := na
+        stopLoss := na
+        baseRisk := na
+        riskR := na
+        tp1Price := na
+        tp2Price := na
+        lock1R := false
+        lock2R := false
+        activeTp1Pct := na
+        activeTp2Pct := na
+        dynAtrMult := na
+        barsInPos := 0
 
     if usePivotSL
         pivLowDyn = ta.valuewhen(not na(ta.pivotlow(low, pivLeft, pivRight)), ta.pivotlow(low, pivLeft, pivRight), 0)
@@ -703,7 +754,22 @@ if strategy.position_size != 0
             stopLoss := math.min(stopLoss, newHigh + atrBufferMult * atrStop)
 
     if useTimeStop and barsInPos >= maxBarsHold
-        timeStopTriggered := true
+        if inLong
+            timeStopLongTriggered := true
+        if inShort
+            timeStopShortTriggered := true
+        entryPrice := na
+        stopLoss := na
+        baseRisk := na
+        riskR := na
+        tp1Price := na
+        tp2Price := na
+        lock1R := false
+        lock2R := false
+        activeTp1Pct := na
+        activeTp2Pct := na
+        dynAtrMult := na
+        barsInPos := 0
 
 longStopPrice = inLong and not na(stopLoss) ? stopLoss : na
 shortStopPrice = inShort and not na(stopLoss) ? stopLoss : na
@@ -731,14 +797,6 @@ strategy.exit("S/TP1", from_entry="S", qty_percent=tp1QtyShort, limit=tp1LimitSh
 strategy.exit("S/TP2", from_entry="S", qty_percent=tp2QtyShort, limit=tp2LimitShort)
 strategy.exit("S/TPD", from_entry="S", qty_percent=tpdQtyShort, limit=tpdLimitShort)
 
-strategy.close_all(comment="Guard Exit", when=guardExitTriggered)
-strategy.close_all(comment="KASA Exit", when=kasaExitTriggered)
-strategy.close_all(comment="TimeStop", when=timeStopTriggered)
-strategy.close_all(comment="EOD Close", when=eodExitTriggered)
-
-if guardExitTriggered or kasaExitTriggered or timeStopTriggered or eodExitTriggered
-    resetTradeState()
-
 // ─────────────────────────────────────────────────────────────────────────────
 // J) 세션 종료, HUD & 디버거
 // ─────────────────────────────────────────────────────────────────────────────
@@ -748,7 +806,40 @@ eodTime = input.string("02:05", "청산 시간 (HH:MM)", group=groupViz)
 eodHour = str.tonumber(str.substring(eodTime, 0, 2))
 eodMinute = str.tonumber(str.substring(eodTime, 3, 5))
 if useEODClose and hour == eodHour and minute >= eodMinute and strategy.position_size != 0
-    eodExitTriggered := true
+    if inLong
+        eodExitLongTriggered := true
+    if inShort
+        eodExitShortTriggered := true
+    entryPrice := na
+    stopLoss := na
+    baseRisk := na
+    riskR := na
+    tp1Price := na
+    tp2Price := na
+    lock1R := false
+    lock2R := false
+    activeTp1Pct := na
+    activeTp2Pct := na
+    dynAtrMult := na
+    barsInPos := 0
+
+closeLongGuard = guardExitLongTriggered
+closeShortGuard = guardExitShortTriggered
+closeLongKasa = kasaExitLongTriggered
+closeShortKasa = kasaExitShortTriggered
+closeLongTime = timeStopLongTriggered
+closeShortTime = timeStopShortTriggered
+closeLongEod = eodExitLongTriggered
+closeShortEod = eodExitShortTriggered
+
+closeLongAny = closeLongGuard or closeLongKasa or closeLongTime or closeLongEod
+closeShortAny = closeShortGuard or closeShortKasa or closeShortTime or closeShortEod
+
+exitCommentLong = closeLongGuard ? "Guard Exit" : closeLongKasa ? "KASA Exit" : closeLongTime ? "TimeStop" : closeLongEod ? "EOD Close" : ""
+exitCommentShort = closeShortGuard ? "Guard Exit" : closeShortKasa ? "KASA Exit" : closeShortTime ? "TimeStop" : closeShortEod ? "EOD Close" : ""
+
+strategy.close("L", comment=exitCommentLong, when=closeLongAny)
+strategy.close("S", comment=exitCommentShort, when=closeShortAny)
 
 plotshape(entry_long and strategy.position_size[1] <= 0, title="롱 신호", style=shape.triangleup, location=location.belowbar, color=color.new(color.lime, 0), size=size.tiny, text="L")
 plotshape(entry_short and strategy.position_size[1] >= 0, title="숏 신호", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.tiny, text="S")
