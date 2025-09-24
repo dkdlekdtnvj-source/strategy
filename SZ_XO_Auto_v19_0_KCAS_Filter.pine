@@ -26,15 +26,15 @@ startDay = input.int(1, "시작 일 (1-31)", minval=1, maxval=31, group=groupTim
 startTs = timestamp(syminfo.timezone, startYear, startMonth, startDay, 0, 0)
 isBacktestWindow = time >= startTs
 
-useSessionFilter = input.bool(true, "기본 세션 필터 사용", group=groupTime)
+useSessionFilter = input.bool(false, "기본 세션 필터 사용", group=groupTime)
 primarySession = input.session("0830-0200", "기본 세션 (거래소 로컬)", group=groupTime)
 sessionAllowed = not useSessionFilter or not na(time(timeframe.period, primarySession))
 
-useKstSession = input.bool(true, "한국시간 세션 필터", group=groupTime)
+useKstSession = input.bool(false, "한국시간 세션 필터", group=groupTime)
 kstSession = input.session("0930-0200", "한국시간 세션", group=groupTime)
 kstAllowed = not useKstSession or not na(time(timeframe.period, kstSession, "Asia/Seoul"))
 
-useDayFilter = input.bool(true, "요일 필터 사용", group=groupTime)
+useDayFilter = input.bool(false, "요일 필터 사용", group=groupTime)
 monOk = input.bool(true, "월", inline="dow1", group=groupTime)
 tueOk = input.bool(true, "화", inline="dow1", group=groupTime)
 wedOk = input.bool(true, "수", inline="dow1", group=groupTime)
@@ -303,7 +303,7 @@ isTradingHalted = isCapitalBreached or isGuardHalted or stop_by_losses or stop_b
 // C) 시장 컨텍스트 & 레짐 필터
 // ─────────────────────────────────────────────────────────────────────────────
 groupContext = "C) 시장 컨텍스트"
-useRegimeFilter = input.bool(true, "상위봉 레짐 필터", group=groupContext)
+useRegimeFilter = input.bool(false, "상위봉 레짐 필터", group=groupContext)
 htfTf = input.timeframe("5", "상위봉 타임프레임", group=groupContext)
 htfEmaLen = input.int(120, "상위봉 EMA 길이", minval=20, maxval=400, group=groupContext)
 htfAdxLen = input.int(8, "상위봉 ADX 길이", minval=5, maxval=50, group=groupContext)
@@ -317,14 +317,14 @@ f_getAdx(_len) =>
     [_, _, adx] = ta.dmi(_len, _len)
     adx
 
-useVWAPFilter = input.bool(true, "VWAP 필터 사용", group=groupContext)
+useVWAPFilter = input.bool(false, "VWAP 필터 사용", group=groupContext)
 vwap = ta.vwap
 
-useMicroTrend = input.bool(true, "EMA 클라우드 사용", group=groupContext)
+useMicroTrend = input.bool(false, "EMA 클라우드 사용", group=groupContext)
 emaFastLenBase = input.int(21, "EMA 빠른선 기본", minval=5, maxval=100, group=groupContext)
 emaSlowLenBase = input.int(55, "EMA 느린선 기본", minval=10, maxval=200, group=groupContext)
 
-useRangeFilter = input.bool(true, "레인지 차단", group=groupContext)
+useRangeFilter = input.bool(false, "레인지 차단", group=groupContext)
 rangeLen = input.int(36, "레인지 기준 봉수", minval=5, maxval=200, group=groupContext)
 rangeAtrMult = input.float(1.4, "레인지 ATR 배수", minval=0.5, maxval=5, step=0.1, group=groupContext)
 rangeHigh = ta.highest(high, rangeLen)
@@ -332,12 +332,12 @@ rangeLow = ta.lowest(low, rangeLen)
 rangeAtr = ta.atr(rangeLen)
 isRanging = (rangeHigh - rangeLow) < rangeAtr * rangeAtrMult
 
-useDistanceGuard = input.bool(true, "가격 이격 가드", group=groupContext)
+useDistanceGuard = input.bool(false, "가격 이격 가드", group=groupContext)
 distanceAtrLen = input.int(21, "이격 ATR 길이", minval=5, maxval=200, group=groupContext)
 distanceMaxAtr = input.float(2.4, "최대 이격 (ATR)", minval=0.5, maxval=5, step=0.1, group=groupContext)
 distanceAtr = ta.atr(distanceAtrLen)
 
-useSlopeFilter = input.bool(true, "EMA 기울기 필터", group=groupContext)
+useSlopeFilter = input.bool(false, "EMA 기울기 필터", group=groupContext)
 slopeLookback = input.int(8, "기울기 룩백", minval=1, maxval=50, group=groupContext)
 slopeMinPct = input.float(0.06, "최소 기울기 (%)", minval=0.0, maxval=1.0, step=0.01, group=groupContext)
 
@@ -430,7 +430,7 @@ distanceOK_S = not useDistanceGuard or (vwDistance <= distanceMaxAtr and trendDi
 // D) 스윕·모멘텀·구조 필터
 // ─────────────────────────────────────────────────────────────────────────────
 groupFilters = "D) 모멘텀 & 구조"
-useMomConfirm = input.bool(true, "모멘텀 확증 사용", group=groupFilters)
+useMomConfirm = input.bool(false, "모멘텀 확증 사용", group=groupFilters)
 bbLen = input.int(18, "볼린저 길이", minval=10, maxval=100, group=groupFilters)
 bbMult = input.float(1.2, "볼린저 배수", minval=0.5, maxval=5, step=0.1, group=groupFilters)
 kcLen = input.int(21, "켈트너 길이", minval=10, maxval=100, group=groupFilters)
@@ -444,7 +444,7 @@ mom = ta.linreg(close - bbBasis, 14, 0)
 momOK_L = not useMomConfirm or (mom > 0 and (not squeezeOn or ta.crossover(mom, 0)))
 momOK_S = not useMomConfirm or (mom < 0 and (not squeezeOn or ta.crossunder(mom, 0)))
 
-useCHoCH = input.bool(true, "CHoCH 확인 사용", group=groupFilters)
+useCHoCH = input.bool(false, "CHoCH 확인 사용", group=groupFilters)
 pL = input.int(2, "피벗 좌", minval=1, maxval=20, group=groupFilters)
 pR = input.int(3, "피벗 우", minval=1, maxval=20, group=groupFilters)
 ph = ta.pivothigh(high, pL, pR)
@@ -456,23 +456,23 @@ bearCHoCH = not na(lastHigh) and not na(lastLow) and close < lastLow and high < 
 chochOK_L = not useCHoCH or bullCHoCH
 chochOK_S = not useCHoCH or bearCHoCH
 
-useVolumeFilter = input.bool(true, "거래량 스파이크 필터", group=groupFilters)
+useVolumeFilter = input.bool(false, "거래량 스파이크 필터", group=groupFilters)
 volumeLookback = input.int(34, "거래량 평균 기간", minval=5, maxval=200, group=groupFilters)
 volumeMultiplier = input.float(1.3, "거래량 배수", minval=1.0, maxval=5.0, step=0.1, group=groupFilters)
 avgVolume = ta.sma(volume, volumeLookback)
 isVolumeSpike = avgVolume > 0 ? volume >= avgVolume * volumeMultiplier : false
 
-useCandleFilter = input.bool(true, "캔들 모멘텀 필터", group=groupFilters)
+useCandleFilter = input.bool(false, "캔들 모멘텀 필터", group=groupFilters)
 candleBodyRatio = input.float(55, "몸통 비율 %", minval=10, maxval=99, step=1, group=groupFilters)
 bodySize = math.abs(close - open)
 fullSize = high - low
 isMomentumCandle = fullSize > 0 and bodySize / fullSize * 100 >= candleBodyRatio
 
-useRSIShift = input.bool(true, "상위봉 RSI 바이어스", group=groupFilters)
+useRSIShift = input.bool(false, "상위봉 RSI 바이어스", group=groupFilters)
 rsiBullBand = input.float(52, "RSI 강세 기준", minval=40, maxval=70, step=0.5, group=groupFilters)
 rsiBearBand = input.float(48, "RSI 약세 기준", minval=30, maxval=60, step=0.5, group=groupFilters)
 
-useEquitySlopeFilter = input.bool(true, "순자산 기울기 필터", group=groupFilters)
+useEquitySlopeFilter = input.bool(false, "순자산 기울기 필터", group=groupFilters)
 eqSlopeLen = input.int(120, "순자산 기울기 길이", minval=20, maxval=500, group=groupFilters)
 eqSlope = ta.linreg(strategy.equity, eqSlopeLen, 0) - ta.linreg(strategy.equity, eqSlopeLen, 1)
 
