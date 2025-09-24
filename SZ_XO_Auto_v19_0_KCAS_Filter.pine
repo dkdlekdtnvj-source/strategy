@@ -314,8 +314,8 @@ htfRsiSeries = request.security(syminfo.tickerid, htfTf, ta.rsi(close, htfRsiLen
 htfRsi = htfRsiSeries[1]
 
 f_getAdx(_len) =>
-    dmiResult = ta.dmi(_len, _len)
-    dmiResult.adx
+    [_, _, adx] = ta.dmi(_len, _len)
+    adx
 
 useVWAPFilter = input.bool(true, "VWAP 필터 사용", group=groupContext)
 vwap = ta.vwap
