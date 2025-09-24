@@ -101,6 +101,15 @@ var int barsInPos = 0
 var float baseRisk = na
 var float activeTp1Pct = na
 var float activeTp2Pct = na
+var bool guardExitTriggered = false
+var bool kasaExitTriggered = false
+var bool timeStopTriggered = false
+var bool eodExitTriggered = false
+
+guardExitTriggered := false
+kasaExitTriggered := false
+timeStopTriggered := false
+eodExitTriggered := false
 
 if barstate.isconfirmed
     newProfit = strategy.netprofit - nz(strategy.netprofit[1])
@@ -246,11 +255,6 @@ kasia_guard_price(entryPrice, direction, qty) =>
         offset = (initialMargin - maintMargin) / qty
         direction == 1 ? entryPrice - offset : entryPrice + offset
 
-bool guardExitTriggered = false
-bool kasaExitTriggered = false
-bool timeStopTriggered = false
-bool eodExitTriggered = false
-
 if useGuardExit and strategy.position_size != 0
     guardEntryPrice = strategy.position_avg_price
     guardDirection = strategy.position_size > 0 ? 1 : -1
@@ -356,16 +360,13 @@ htfAdxLenShort = useAsymLogic ? htfAdxLenShortInput : htfAdxLen
 htfAdxThLong = useAsymLogic ? htfAdxThLongInput : htfAdxTh
 htfAdxThShort = useAsymLogic ? htfAdxThShortInput : htfAdxTh
 
-f_getAdx(len) =>
-    ta.dmi(len, len)[2]
-
 htfEmaSeriesLong = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLenLong))
 htfEmaLong = htfEmaSeriesLong[1]
 htfEmaSeriesShort = useAsymLogic and htfEmaLenShort != htfEmaLenLong ? request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLenShort)) : htfEmaSeriesLong
 htfEmaShort = htfEmaSeriesShort[1]
-htfAdxSeriesLong = request.security(syminfo.tickerid, htfTf, f_getAdx(htfAdxLenLong))
+htfAdxSeriesLong = request.security(syminfo.tickerid, htfTf, ta.adx(htfAdxLenLong))
 htfAdxLong = htfAdxSeriesLong[1]
-htfAdxSeriesShort = useAsymLogic and htfAdxLenShort != htfAdxLenLong ? request.security(syminfo.tickerid, htfTf, f_getAdx(htfAdxLenShort)) : htfAdxSeriesLong
+htfAdxSeriesShort = useAsymLogic and htfAdxLenShort != htfAdxLenLong ? request.security(syminfo.tickerid, htfTf, ta.adx(htfAdxLenShort)) : htfAdxSeriesLong
 htfAdxShort = htfAdxSeriesShort[1]
 
 microTrendLong = not useMicroTrend or emaFastLong > emaSlowLong
