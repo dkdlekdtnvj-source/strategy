@@ -1,0 +1,41 @@
+symbol: "BINANCE:ETHUSDT"
+timeframe: "5m"
+htf_timeframe: "1h"
+backtest:
+  from: "2023-01-01"
+  to: "2025-09-24"
+fees:
+  commission_pct: 0.0005
+  slippage_ticks: 2
+risk:
+  leverage: 10
+  qty_pct: 30
+  liq_buffer_pct: 0.5
+  min_trades: 100
+  min_hold_bars: 1
+  max_consecutive_losses: 5
+  penalty_trade: 0.25
+  penalty_hold: 0.1
+  penalty_consecutive_loss: 0.5
+objectives:
+  - {name: "NetProfit", weight: 1.0}
+  - {name: "MaxDD", weight: 0.5}
+  - {name: "Sortino", weight: 0.75}
+  - {name: "WinRate", weight: 0.5}
+search:
+  algo: "bayes"
+  n_trials: 200
+  seed: 42
+walk_forward:
+  train_bars: 5000
+  test_bars: 2000
+  step: 2000
+space:
+  wtLen: {type: int, min: 6, max: 28, step: 2}
+  thr: {type: float, min: 0.3, max: 1.2, step: 0.1}
+  atrMult: {type: float, min: 1.0, max: 3.0, step: 0.25}
+  useHTF: {type: bool}
+  useRSI: {type: bool}
+  useMACD: {type: bool}
+  useStoch: {type: bool}
+  htfEmaLen: {type: int, min: 6, max: 20, step: 1}

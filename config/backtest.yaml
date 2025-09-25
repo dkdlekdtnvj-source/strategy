@@ -1,0 +1,14 @@
+symbols: ["BINANCE:ETHUSDT", "BINANCE:BTCUSDT"]
+timeframes: ["1m", "5m", "15m"]
+periods:
+  - {from: "2023-01-01", to: "2023-12-31"}
+  - {from: "2024-01-01", to: "2024-12-31"}
+  - {from: "2025-01-01", to: "2025-09-24"}
+htf_timeframe: "1h"
+fees:
+  commission_pct: 0.0005
+  slippage_ticks: 2
+risk:
+  leverage: 10
+  qty_pct: 30
+  liq_buffer_pct: 0.5

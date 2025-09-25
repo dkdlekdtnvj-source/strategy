@@ -1,0 +1,282 @@
+//@version=5
+strategy(
+    title="Kasia Optimised",
+    overlay=true,
+    initial_capital=10000,
+    default_qty_type=strategy.percent_of_equity,
+    default_qty_value=10,
+    pyramiding=1,
+    commission_type=strategy.commission.percent,
+    commission_value=0.05,
+    process_orders_on_close=true,
+    calc_on_every_tick=false
+)
+
+// === Optimisation inputs ===
+var string gOpt = "1. Optimisation"
+wtLen    = input.int(14, "WaveTrend Length", minval=4, maxval=64, step=2, group=gOpt)
+thr      = input.float(0.6, "Signal Threshold", minval=0.1, maxval=2.0, step=0.05, group=gOpt)
+atrMult  = input.float(1.5, "ATR Multiple", minval=0.5, maxval=5.0, step=0.25, group=gOpt)
+useHTF   = input.bool(true, "Sync with HTF", group=gOpt)
+useRSI   = input.bool(true, "Enable RSI Filter", group=gOpt)
+useMACD  = input.bool(true, "Enable MACD Filter", group=gOpt)
+useStoch = input.bool(true, "Enable Stoch Filter", group=gOpt)
+htfLen   = input.int(34, "HTF EMA Length", minval=2, maxval=200, step=1, group=gOpt)
+
+var string gExec = "2. Execution"
+qtyPct          = input.float(30.0, "Order Size (%)", minval=1.0, maxval=100.0, step=0.5, group=gExec)
+commission_pct  = input.float(0.05, "Commission (%)", minval=0.0, maxval=1.0, step=0.01, group=gExec)
+slippage_ticks  = input.int(2, "Slippage (ticks)", minval=0, group=gExec)
+leverage        = input.float(10.0, "Leverage", minval=1.0, maxval=50.0, step=0.5, group=gExec)
+liq_buffer_pct  = input.float(0.5, "Liquidation Buffer (%)", minval=0.0, maxval=10.0, step=0.1, group=gExec)
+htf_tf          = input.timeframe("60", "HTF Timeframe", group=gExec)
+startDate       = input.time(timestamp("2020-01-01T00:00:00Z"), "Backtest Start", group=gExec)
+
+var string gRisk = "3. Risk & Stops"
+useStopLoss      = input.bool(true, "Use Base Stop", group=gRisk)
+useAtrTrail      = input.bool(true, "Use ATR Trail", group=gRisk)
+usePivotStop     = input.bool(true, "Use Pivot Stop", group=gRisk)
+useBreakevenStop = input.bool(true, "Use Breakeven", group=gRisk)
+baseStopMult     = input.float(1.0, "Base Stop ATR Mult", minval=0.1, step=0.1, group=gRisk)
+trailAtrLen      = input.int(14, "Trail ATR Length", minval=1, group=gRisk)
+trailAtrMult     = input.float(2.0, "Trail ATR Mult", minval=0.1, step=0.1, group=gRisk)
+breakevenMult    = input.float(1.0, "Breakeven Multiplier", minval=0.1, step=0.1, group=gRisk)
+useShock         = input.bool(true, "Use Volatility Shock", group=gRisk)
+shockLookback    = input.int(20, "Shock Lookback", minval=1, group=gRisk)
+shockMult        = input.float(2.5, "Shock Threshold Mult", minval=0.1, step=0.1, group=gRisk)
+shockAction      = input.string("Trail Tighten", "Shock Action", options=["Trail Tighten", "즉시 청산"], group=gRisk)
+
+var string gExit = "4. Exit Controls"
+useMomFade   = input.bool(true, "Enable Momentum Fade", group=gExit)
+momFadeBars  = input.int(5, "Fade Lookback", minval=1, maxval=50, group=gExit)
+minHoldBars  = input.int(3, "Minimum Hold Bars", minval=0, maxval=200, group=gExit)
+fadeMode     = input.string("VN", "Fade Mode", options=["VN", "Legacy"], group=gExit)
+useReversal  = input.bool(true, "Delay After Flip", group=gExit)
+reversalBars = input.int(2, "Reversal Cooldown Bars", minval=0, maxval=50, group=gExit)
+
+var string gFilters = "5. Filters"
+useEventFilter = input.bool(false, "이벤트 창구 사용", group=gFilters)
+eventWindows   = input.string("", "배제 구간(ISO8601 start/end)", group=gFilters)
+useRangeFilter = input.bool(true, "Use Range Filter", group=gFilters)
+rangeLookback  = input.int(60, "Range Lookback Bars", minval=5, group=gFilters)
+rangePercent   = input.float(0.7, "Range Width %", minval=0.1, maxval=5.0, step=0.1, group=gFilters)
+
+strategy.leverage(leverage)
+strategy.commission.percent(commission_pct)
+strategy.slippage(slippage_ticks)
+
+// === Helpers ===
+// Guard against invalid market data when computing order sizing.
+calcOrderSize(float closePrice, float stopDistance, float signalRiskMult) =>
+    if closePrice <= 0 or stopDistance <= 0
+        0.0
+    else
+        qtyPct * signalRiskMult
+
+timestamp_from_iso(string iso) =>
+    timestamp(str.trim(iso))
+
+in_event_window() =>
+    if not useEventFilter or str.length(eventWindows) == 0
+        false
+    else
+        bool hit = false
+        for seg in str.split(eventWindows, ",")
+            parts = str.split(str.trim(seg), "/")
+            if array.size(parts) == 2
+                t0 = timestamp_from_iso(array.get(parts, 0))
+                t1 = timestamp_from_iso(array.get(parts, 1))
+                hit := hit or (time >= t0 and time <= t1)
+        hit
+
+// === Core indicators ===
+price = close
+hlc3 = (high + low + close) / 3.0
+ap = ta.ema(hlc3, wtLen)
+atr_val = ta.atr(wtLen)
+wavetrend = (price - ap) / atr_val
+osc = ta.ema(wavetrend, math.max(2, wtLen / 2))
+
+rsi = ta.rsi(price, 14)
+macdLine = ta.ema(price, 12) - ta.ema(price, 26)
+macdSignal = ta.ema(macdLine, 9)
+stoch = ta.sma(ta.stoch(high, low, close, 14), 3)
+
+// Fade oscillator proxy
+type FadeStruct
+    float o
+
+FadeStruct new_fade(float src) =>
+    FadeStruct.new(ta.ema(src - src[1], math.max(1, momFadeBars)))
+
+oFade = new_fade(osc)
+
+// === Higher time frame confirmation ===
+htf_close = request.security(syminfo.tickerid, htf_tf, close, lookahead=barmerge.lookahead_off)
+htf_trend = request.security(syminfo.tickerid, htf_tf, ta.ema(close, htfLen), lookahead=barmerge.lookahead_off)
+htf_confirmed = request.security(syminfo.tickerid, htf_tf, barstate.isconfirmed ? 1 : 0, lookahead=barmerge.lookahead_off) > 0
+htf_ok = not useHTF or (htf_confirmed and htf_close >= htf_trend)
+
+// === Structure pivots (HTF) ===
+htf_high = request.security(syminfo.tickerid, htf_tf, high, lookahead=barmerge.lookahead_off)
+htf_low  = request.security(syminfo.tickerid, htf_tf, low, lookahead=barmerge.lookahead_off)
+ph_vn = request.security(syminfo.tickerid, htf_tf, ta.pivothigh(htf_high, 3, 3), lookahead=barmerge.lookahead_off)
+pl_vn = request.security(syminfo.tickerid, htf_tf, ta.pivotlow(htf_low, 3, 3), lookahead=barmerge.lookahead_off)
+float lastPH_vn = na(ph_vn) ? high : ta.valuewhen(not na(ph_vn), ph_vn, 0)
+float lastPL_vn = na(pl_vn) ? low : ta.valuewhen(not na(pl_vn), pl_vn, 0)
+
+// === Filters ===
+eventBlock = in_event_window()
+rangeHigh = ta.highest(high, rangeLookback)
+rangeLow = ta.lowest(low, rangeLookback)
+rangeWidth = rangeHigh - rangeLow
+rangeOk = not useRangeFilter or (rangeWidth > (rangePercent / 100.0) * price)
+
+// === Signals ===
+long_sig = osc > thr
+short_sig = osc < -thr
+
+if useRSI
+    long_sig := long_sig and rsi > 50
+    short_sig := short_sig and rsi < 50
+
+if useMACD
+    long_sig := long_sig and macdLine > macdSignal
+    short_sig := short_sig and macdLine < macdSignal
+
+if useStoch
+    long_sig := long_sig and stoch > 50
+    short_sig := short_sig and stoch < 50
+
+// === State tracking ===
+var int posBars = 0
+var float highestSinceEntry = na
+var float lowestSinceEntry = na
+var float lastLongExitBar = na
+var float lastShortExitBar = na
+var string[] trace = array.new_string()
+
+log_event(string kind, string info) =>
+    if barstate.isconfirmed
+        array.push(trace, str.format("{0}|{1}|{2}|{3}", time, kind, info, strategy.position_size))
+
+// === Risk references ===
+atrStopDistance = ta.atr(14) * atrMult
+trailAtr = ta.atr(trailAtrLen) * trailAtrMult
+
+// === Execution ===
+if barstate.isconfirmed and time >= startDate
+    posBars := strategy.position_size != 0 ? posBars + 1 : 0
+    highestSinceEntry := strategy.position_size > 0 ? (na(highestSinceEntry) ? close : math.max(highestSinceEntry, high)) : na
+    lowestSinceEntry := strategy.position_size < 0 ? (na(lowestSinceEntry) ? close : math.min(lowestSinceEntry, low)) : na
+
+    bool reversalReadyLong = true
+    bool reversalReadyShort = true
+    if useReversal
+        reversalReadyLong := na(lastShortExitBar) or (bar_index - lastShortExitBar > reversalBars)
+        reversalReadyShort := na(lastLongExitBar) or (bar_index - lastLongExitBar > reversalBars)
+
+    bool hasLong = strategy.position_size > 0
+    bool hasShort = strategy.position_size < 0
+
+    bool canTrade = htf_ok and not eventBlock and rangeOk
+
+    bool enterLong = canTrade and long_sig and not short_sig and reversalReadyLong and not hasLong
+    bool enterShort = canTrade and short_sig and not long_sig and reversalReadyShort and not hasShort
+
+    float baseStopLong = hasLong ? strategy.position_avg_price - atrStopDistance * baseStopMult : na
+    float baseStopShort = hasShort ? strategy.position_avg_price + atrStopDistance * baseStopMult : na
+
+    float pivotStopLong = hasLong ? lastPL_vn : na
+    float pivotStopShort = hasShort ? lastPH_vn : na
+
+    float trailStopLong = hasLong and not na(highestSinceEntry) ? highestSinceEntry - trailAtr : na
+    float trailStopShort = hasShort and not na(lowestSinceEntry) ? lowestSinceEntry + trailAtr : na
+
+    prevClose = nz(close[1], close)
+    trueRange = math.max(high - low, math.max(math.abs(high - prevClose), math.abs(low - prevClose)))
+    bool isShock = useShock and trueRange > ta.atr(shockLookback) * shockMult
+
+    float stopLongToUse = na
+    float stopShortToUse = na
+
+    if isShock and shockAction == "즉시 청산"
+        if hasLong
+            strategy.close("Long", comment="Shock Exit")
+            log_event("EXIT_LONG_SHOCK", str.tostring(close))
+            lastLongExitBar := bar_index
+        if hasShort
+            strategy.close("Short", comment="Shock Exit")
+            log_event("EXIT_SHORT_SHOCK", str.tostring(close))
+            lastShortExitBar := bar_index
+    else
+        if hasLong
+            if useBreakevenStop and not na(highestSinceEntry) and (highestSinceEntry - strategy.position_avg_price) >= trailAtr * breakevenMult
+                stopLongToUse := na(stopLongToUse) ? strategy.position_avg_price : math.max(stopLongToUse, strategy.position_avg_price)
+            if usePivotStop and not na(pivotStopLong)
+                stopLongToUse := na(stopLongToUse) ? pivotStopLong : math.max(stopLongToUse, pivotStopLong)
+            if useAtrTrail and not na(trailStopLong)
+                stopLongToUse := na(stopLongToUse) ? trailStopLong : math.max(stopLongToUse, trailStopLong)
+            if useStopLoss and not na(baseStopLong)
+                stopLongToUse := na(stopLongToUse) ? baseStopLong : math.max(stopLongToUse, baseStopLong)
+        if hasShort
+            if useBreakevenStop and not na(lowestSinceEntry) and (strategy.position_avg_price - lowestSinceEntry) >= trailAtr * breakevenMult
+                stopShortToUse := na(stopShortToUse) ? strategy.position_avg_price : math.min(stopShortToUse, strategy.position_avg_price)
+            if usePivotStop and not na(pivotStopShort)
+                stopShortToUse := na(stopShortToUse) ? pivotStopShort : math.min(stopShortToUse, pivotStopShort)
+            if useAtrTrail and not na(trailStopShort)
+                stopShortToUse := na(stopShortToUse) ? trailStopShort : math.min(stopShortToUse, trailStopShort)
+            if useStopLoss and not na(baseStopShort)
+                stopShortToUse := na(stopShortToUse) ? baseStopShort : math.min(stopShortToUse, baseStopShort)
+
+    if not na(stopLongToUse)
+        strategy.exit("LongStop", from_entry="Long", stop=stopLongToUse, alert_message="{\"action\":\"exit_long\"}")
+    if not na(stopShortToUse)
+        strategy.exit("ShortStop", from_entry="Short", stop=stopShortToUse, alert_message="{\"action\":\"exit_short\"}")
+
+    int fadeBars = math.max(momFadeBars, 1)
+    bool fadeMagnitudeDown = ta.falling(math.abs(oFade.o), fadeBars)
+
+    bool fadeLongCond_vn  = (oFade.o > 0) and fadeMagnitudeDown
+    bool fadeShortCond_vn = (oFade.o < 0) and fadeMagnitudeDown
+
+    bool fadeLongCond_lg  = (oFade.o > 0 and oFade.o <= oFade.o[1])
+    bool fadeShortCond_lg = (oFade.o < 0 and oFade.o <  oFade.o[1])
+
+    bool fadeLongCond  = fadeMode == "VN" ? fadeLongCond_vn  : fadeLongCond_lg
+    bool fadeShortCond = fadeMode == "VN" ? fadeShortCond_vn : fadeShortCond_lg
+
+    bool exitLongFade  = useMomFade and fadeLongCond  and posBars >= minHoldBars
+    bool exitShortFade = useMomFade and fadeShortCond and posBars >= minHoldBars
+
+    if exitLongFade and hasLong
+        strategy.close("Long", comment="Fade Exit")
+        log_event("EXIT_LONG_FADE", str.tostring(close))
+        lastLongExitBar := bar_index
+    if exitShortFade and hasShort
+        strategy.close("Short", comment="Fade Exit")
+        log_event("EXIT_SHORT_FADE", str.tostring(close))
+        lastShortExitBar := bar_index
+
+    float longQty = calcOrderSize(close, atrStopDistance, 1.0)
+    float shortQty = calcOrderSize(close, atrStopDistance, 1.0)
+
+    if enterLong and longQty > 0
+        strategy.entry("Long", strategy.long, qty_percent=longQty, alert_message=str.format("{\"action\":\"enter_long\",\"mode\":\"{0}\",\"symbol\":\"{1}\",\"tf\":\"{2}\"}", fadeMode, syminfo.ticker, timeframe.period))
+        log_event("ENTER_LONG", str.tostring(close))
+    if enterShort and shortQty > 0
+        strategy.entry("Short", strategy.short, qty_percent=shortQty, alert_message=str.format("{\"action\":\"enter_short\",\"mode\":\"{0}\",\"symbol\":\"{1}\",\"tf\":\"{2}\"}", fadeMode, syminfo.ticker, timeframe.period))
+        log_event("ENTER_SHORT", str.tostring(close))
+
+    if hasLong and close <= strategy.position_avg_price * (1.0 - liq_buffer_pct / 100.0)
+        strategy.close("Long", comment="LiqGuard")
+        log_event("EXIT_LONG_LIQ", str.tostring(close))
+        lastLongExitBar := bar_index
+    if hasShort and close >= strategy.position_avg_price * (1.0 + liq_buffer_pct / 100.0)
+        strategy.close("Short", comment="LiqGuard")
+        log_event("EXIT_SHORT_LIQ", str.tostring(close))
+        lastShortExitBar := bar_index
+
+// === Debug Plots ===
+plot(osc, title="WaveTrend", color=color.aqua)
+plot(htf_trend, title="HTF Trend", color=color.orange)
