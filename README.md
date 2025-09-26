@@ -41,11 +41,12 @@ pip install -r requirements.txt
 3. Configure the sweep universe in `config/backtest.yaml`. By default it contains
   nine Binance USDT perpetual pairs (ENA, ETH, BTC, SOL, **XPL**, **ASTER**, DOGE,
   XRP, SUI) with lower timeframes 1m/3m/5m, higher timeframes 15m/1h, and a single
-  2024-01-01 → 2025-09-25 창. Each trial is evaluated across every symbol × LTF × HTF combination
-   so you can immediately see which mix delivers the best Sortino/Profit Factor.
-   The `symbol_aliases` mapping lets you keep the newly-listed ticker names you
-   prefer (`XPLUSDT`, `ASTERUSDT`) while the optimiser automatically fetches data
-   using Binance's current instruments (`XPLAUSDT`, `ASTRUSDT`).
+  2024-01-01 → 2025-09-25 창. The optimiser now treats the LTF/HTF selections as
+  categorical parameters, so each Optuna trial chooses one combination while the
+  reports highlight which pairing delivers the strongest Sortino/Profit Factor.
+  The `symbol_aliases` mapping lets you keep the newly-listed ticker names you
+  prefer (`XPLUSDT`, `ASTERUSDT`) while the optimiser automatically fetches data
+  using Binance's current instruments (`XPLAUSDT`, `ASTRUSDT`).
 4. Launch the optimiser non-interactively or with prompts:
 
    ```bash
@@ -58,10 +59,9 @@ pip install -r requirements.txt
    python -m optimize.run --interactive
    ```
 
-   The interactive mode lets you pick the symbol, lower timeframe (1m/3m/5m),
-   higher timeframe (15m/1h), evaluation window, leverage, position size, and the
-   boolean filters (HTF sync, ATR trail, pivot stops, breakeven, etc.) from the
-   terminal. Command-line overrides are also
+   The interactive mode lets you pick the symbol, evaluation window, leverage,
+   position size, and the boolean filters (HTF sync, ATR trail, pivot stops,
+   breakeven, etc.) from the terminal. Command-line overrides are also
    available:
 
    - `--symbol`, `--timeframe`, `--htf`, `--start`, `--end`
@@ -90,9 +90,9 @@ If you would like a guided experience without memorising the CLI switches, run:
 python -m optimize.quickstart
 ```
 
-The helper will prompt for the symbol, lower/higher timeframes, backtest window,
-leverage, position size, boolean filter toggles, and trial count. Once the
-questions are answered it forwards the selections to `optimize.run` and the
+The helper will prompt for the symbol, backtest window, leverage, position size,
+boolean filter toggles, and trial count. Once the questions are answered it
+forwards the selections to `optimize.run` and the
 reports appear under `reports/` just like the direct CLI entry point.
 
 ## Testing

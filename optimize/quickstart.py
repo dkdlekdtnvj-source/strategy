@@ -78,15 +78,6 @@ def _extract_symbol_choices(backtest_cfg: Dict[str, object]) -> List[str]:
     return choices
 
 
-def _extract_timeframes(cfg: Dict[str, object], key: str) -> List[str]:
-    raw = cfg.get(key)
-    if isinstance(raw, (list, tuple)):
-        return [str(val) for val in raw if val]
-    if raw:
-        return [str(raw)]
-    return []
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Interactive quick-start for Pine optimisation")
     parser.add_argument("--params", type=Path, default=Path("config/params.yaml"))
@@ -100,20 +91,9 @@ def main() -> None:
     backtest_cfg = load_yaml(args.backtest)
 
     symbol_default = str(params_cfg.get("symbol", "")) or None
-    timeframe_default = str(params_cfg.get("timeframe", "")) or None
     backtest_cfg.setdefault("symbols", backtest_cfg.get("symbols", []))
-    backtest_cfg.setdefault("timeframes", backtest_cfg.get("timeframes", []))
 
     symbol = _prompt_choice("Select symbol", _extract_symbol_choices(backtest_cfg) or [symbol_default or ""], symbol_default)
-    timeframe = _prompt_choice("Select lower timeframe", backtest_cfg.get("timeframes", []) or [timeframe_default or ""], timeframe_default)
-
-    htf_choices = _extract_timeframes(params_cfg, "htf_timeframes") or _extract_timeframes(backtest_cfg, "htf_timeframes")
-    htf_default = htf_choices[0] if htf_choices else None
-    htf = ""
-    if htf_choices:
-        htf = _prompt_choice("Select higher timeframe (Enter=use first)", htf_choices + ["모든 HTF"], htf_default)
-        if htf == "모든 HTF":
-            htf = ""
 
     backtest_window = params_cfg.get("backtest", {}) or {}
     start_default = backtest_window.get("from") or ""
@@ -155,10 +135,6 @@ def main() -> None:
 
     if symbol:
         cli_args.extend(["--symbol", symbol])
-    if timeframe:
-        cli_args.extend(["--timeframe", timeframe])
-    if htf:
-        cli_args.extend(["--htf", htf])
     if start:
         cli_args.extend(["--start", start])
     if end:

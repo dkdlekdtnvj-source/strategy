@@ -39,6 +39,27 @@ def run_walk_forward(
 ) -> Dict[str, object]:
     segments: List[SegmentResult] = []
     total = len(df)
+
+    if total == 0:
+        return {"segments": [], "oos_mean": 0.0, "oos_median": 0.0, "count": 0}
+
+    train_bars = int(train_bars)
+    test_bars = int(test_bars)
+    step = max(int(step), 1)
+
+    if train_bars <= 0 or train_bars >= total:
+        train_bars = total
+    if test_bars <= 0 or train_bars + test_bars > total:
+        metrics = run_backtest(df, params, fees, risk, htf_df=htf_df)
+        clean = _clean_metrics(metrics)
+        return {
+            "segments": segments,
+            "oos_mean": float(clean.get("NetProfit", 0.0)),
+            "oos_median": float(clean.get("NetProfit", 0.0)),
+            "count": 0,
+            "full_run": clean,
+        }
+
     start = 0
 
     while start + train_bars + test_bars <= total:

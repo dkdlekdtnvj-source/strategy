@@ -23,6 +23,11 @@ def sample_parameters(trial: optuna.Trial, space: SpaceSpec) -> Dict[str, object
             params[name] = trial.suggest_float(name, float(spec["min"]), float(spec["max"]), step=float(spec.get("step", 0.1)))
         elif dtype == "bool":
             params[name] = trial.suggest_categorical(name, [True, False])
+        elif dtype == "choice":
+            values = spec.get("values") or spec.get("options")
+            if not values:
+                raise ValueError(f"Choice parameter '{name}' requires a non-empty 'values' list.")
+            params[name] = trial.suggest_categorical(name, list(values))
         else:
             raise ValueError(f"Unsupported parameter type: {dtype}")
     return params
@@ -40,6 +45,11 @@ def grid_choices(space: SpaceSpec) -> Dict[str, List[object]]:
             grid[name] = [round(val, 10) for val in values.tolist()]
         elif dtype == "bool":
             grid[name] = [True, False]
+        elif dtype == "choice":
+            values = spec.get("values") or spec.get("options")
+            if not values:
+                raise ValueError(f"Choice parameter '{name}' requires a non-empty 'values' list for grid sampling.")
+            grid[name] = list(values)
         else:
             raise ValueError(f"Unsupported parameter type for grid: {dtype}")
     return grid

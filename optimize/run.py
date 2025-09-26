@@ -115,6 +115,107 @@ class DatasetSpec:
         }
 
 
+def _normalise_timeframe_value(value: Optional[object]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _normalise_htf_value(value: Optional[object]) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "na", "off", "0"}:
+        return None
+    return text
+
+
+def _group_datasets(
+    datasets: Sequence[DatasetSpec],
+) -> Tuple[Dict[Tuple[str, Optional[str]], List[DatasetSpec]], Dict[str, List[DatasetSpec]], Tuple[str, Optional[str]]]:
+    groups: Dict[Tuple[str, Optional[str]], List[DatasetSpec]] = {}
+    timeframe_groups: Dict[str, List[DatasetSpec]] = {}
+    for dataset in datasets:
+        key = (dataset.timeframe, dataset.htf_timeframe or None)
+        groups.setdefault(key, []).append(dataset)
+        timeframe_groups.setdefault(dataset.timeframe, []).append(dataset)
+
+    if not groups:
+        raise RuntimeError("No datasets available for optimisation")
+
+    default_key = next(iter(groups))
+    return groups, timeframe_groups, default_key
+
+
+def _select_datasets_for_params(
+    params_cfg: Dict[str, object],
+    dataset_groups: Dict[Tuple[str, Optional[str]], List[DatasetSpec]],
+    timeframe_groups: Dict[str, List[DatasetSpec]],
+    default_key: Tuple[str, Optional[str]],
+    params: Dict[str, object],
+) -> Tuple[Tuple[str, Optional[str]], List[DatasetSpec]]:
+    def _match(tf: str, htf: Optional[str]) -> Optional[Tuple[Tuple[str, Optional[str]], List[DatasetSpec]]]:
+        tf_lower = tf.lower()
+        htf_lower = (htf or "").lower()
+        for key, group in dataset_groups.items():
+            key_tf, key_htf = key
+            if key_tf.lower() != tf_lower:
+                continue
+            key_htf_lower = (key_htf or "").lower()
+            if key_htf_lower == htf_lower:
+                return key, group
+        return None
+
+    timeframe_value = (
+        _normalise_timeframe_value(params.get("timeframe"))
+        or _normalise_timeframe_value(params.get("ltf"))
+        or _normalise_timeframe_value(params_cfg.get("timeframe"))
+    )
+
+    htf_value = (
+        _normalise_htf_value(params.get("htf"))
+        or _normalise_htf_value(params.get("htf_timeframe"))
+    )
+
+    if htf_value is None:
+        cfg_htf = params_cfg.get("htf_timeframe")
+        if cfg_htf:
+            htf_value = _normalise_htf_value(cfg_htf)
+        elif isinstance(params_cfg.get("htf_timeframes"), list) and len(params_cfg["htf_timeframes"]) == 1:
+            htf_value = _normalise_htf_value(params_cfg["htf_timeframes"][0])
+
+    if timeframe_value is None:
+        timeframe_value = default_key[0]
+
+    selected = None
+    if timeframe_value:
+        selected = _match(timeframe_value, htf_value)
+        if selected is None and htf_value is not None:
+            selected = _match(timeframe_value, None)
+        if selected is None:
+            for key, group in dataset_groups.items():
+                if key[0].lower() == timeframe_value.lower():
+                    selected = (key, group)
+                    break
+
+        if selected is None:
+            for tf, group in timeframe_groups.items():
+                if tf.lower() == timeframe_value.lower():
+                    key = (group[0].timeframe, group[0].htf_timeframe or None)
+                    selected = (key, group)
+                    break
+
+    if selected is None:
+        selected = (default_key, dataset_groups[default_key])
+
+    return selected
+
+
+def _pick_primary_dataset(datasets: Sequence[DatasetSpec]) -> DatasetSpec:
+    return max(datasets, key=lambda item: len(item.df))
+
+
 def _resolve_symbol_entry(entry: object, alias_map: Dict[str, str]) -> Tuple[str, str]:
     """Normalise a symbol entry to a display name and a Binance fetch symbol."""
 
@@ -321,6 +422,8 @@ def optimisation_loop(
     search_cfg = params_cfg.get("search", {})
     space = build_space(params_cfg.get("space", {}))
 
+    dataset_groups, timeframe_groups, default_key = _group_datasets(datasets)
+
     algo = search_cfg.get("algo", "bayes")
     seed = search_cfg.get("seed")
     n_trials = int(search_cfg.get("n_trials", 50))
@@ -339,10 +442,13 @@ def optimisation_loop(
     def objective(trial: optuna.Trial) -> float:
         params = sample_parameters(trial, space)
         params.update(forced_params)
+        key, selected_datasets = _select_datasets_for_params(
+            params_cfg, dataset_groups, timeframe_groups, default_key, params
+        )
         dataset_metrics: List[Dict[str, object]] = []
         numeric_metrics: List[Dict[str, float]] = []
 
-        for dataset in datasets:
+        for dataset in selected_datasets:
             metrics = run_backtest(dataset.df, params, fees, risk, htf_df=dataset.htf)
             numeric_metrics.append(metrics)
             dataset_metrics.append(
@@ -363,6 +469,7 @@ def optimisation_loop(
             "datasets": dataset_metrics,
             "score": score,
             "valid": aggregated.get("Valid", True),
+            "dataset_key": {"timeframe": key[0], "htf_timeframe": key[1]},
         }
         results.append(record)
         return score
@@ -426,7 +533,6 @@ def execute(args: argparse.Namespace) -> None:
         forced_params[name] = False
 
     symbol_choices = list(dict.fromkeys(backtest_cfg.get("symbols") or ([params_cfg.get("symbol")] if params_cfg.get("symbol") else [])))
-    timeframe_choices = list(dict.fromkeys(backtest_cfg.get("timeframes") or ([params_cfg.get("timeframe")] if params_cfg.get("timeframe") else [])))
 
     def _collect_htfs(cfg: Dict[str, object]) -> List[str]:
         values: List[str] = []
@@ -441,37 +547,21 @@ def execute(args: argparse.Namespace) -> None:
     htf_choices = list(dict.fromkeys(_collect_htfs(backtest_cfg) or _collect_htfs(params_cfg)))
 
     selected_symbol = args.symbol or params_cfg.get("symbol") or (symbol_choices[0] if symbol_choices else None)
-    selected_timeframe = args.timeframe or params_cfg.get("timeframe") or (timeframe_choices[0] if timeframe_choices else None)
+    selected_timeframe = args.timeframe
     selected_htf: Optional[str] = args.htf if args.htf else None
+    timeframe_overridden = args.timeframe is not None
+    htf_overridden = args.htf is not None
 
-    if args.interactive:
-        if symbol_choices:
-            selected_symbol = _prompt_choice("Select symbol", symbol_choices, selected_symbol)
-        if timeframe_choices:
-            selected_timeframe = _prompt_choice("Select timeframe", timeframe_choices, selected_timeframe)
-        if htf_choices:
-            print("\nSelect higher timeframe:")
-            print("  0. 모든 HTF 사용")
-            for idx, value in enumerate(htf_choices, start=1):
-                marker = " (default)" if selected_htf == value else ""
-                print(f"  {idx}. {value}{marker}")
-            raw = input("Select option (Enter=모든 HTF): ").strip()
-            if raw.isdigit():
-                sel = int(raw)
-                if sel == 0:
-                    selected_htf = None
-                elif 1 <= sel <= len(htf_choices):
-                    selected_htf = htf_choices[sel - 1]
-            elif raw:
-                selected_htf = raw
+    if args.interactive and symbol_choices:
+        selected_symbol = _prompt_choice("Select symbol", symbol_choices, selected_symbol)
 
     if selected_symbol:
         params_cfg["symbol"] = selected_symbol
         backtest_cfg["symbols"] = [selected_symbol]
-    if selected_timeframe:
+    if timeframe_overridden and selected_timeframe:
         params_cfg["timeframe"] = selected_timeframe
         backtest_cfg["timeframes"] = [selected_timeframe]
-    if selected_htf is not None:
+    if htf_overridden and selected_htf is not None:
         params_cfg["htf_timeframes"] = [selected_htf]
         backtest_cfg["htf_timeframes"] = [selected_htf]
     elif htf_choices:
@@ -548,9 +638,26 @@ def execute(args: argparse.Namespace) -> None:
     optimisation = optimisation_loop(datasets, params_cfg, objectives, fees, risk, forced_params)
 
     walk_cfg = params_cfg.get("walk_forward", {"train_bars": 5000, "test_bars": 2000, "step": 2000})
-    primary_dataset = datasets[0]
+    dataset_groups, timeframe_groups, default_key = _group_datasets(datasets)
+
+    def _resolve_record_dataset(record: Dict[str, object]) -> Tuple[Tuple[str, Optional[str]], List[DatasetSpec]]:
+        key_info = record.get("dataset_key") if isinstance(record, dict) else None
+        if isinstance(key_info, dict):
+            candidate_key = (key_info.get("timeframe"), key_info.get("htf_timeframe"))
+            if candidate_key in dataset_groups:
+                return candidate_key, dataset_groups[candidate_key]
+        return _select_datasets_for_params(
+            params_cfg,
+            dataset_groups,
+            timeframe_groups,
+            default_key,
+            record.get("params", {}),
+        )
 
     best_record = optimisation["best"]
+    best_key, best_group = _resolve_record_dataset(best_record)
+    primary_dataset = _pick_primary_dataset(best_group)
+
     wf_summary = run_walk_forward(
         primary_dataset.df,
         best_record["params"],
@@ -568,6 +675,8 @@ def execute(args: argparse.Namespace) -> None:
             "score": best_record.get("score"),
             "oos_mean": wf_summary.get("oos_mean"),
             "params": best_record.get("params"),
+            "timeframe": best_key[0],
+            "htf_timeframe": best_key[1],
         }
     ]
 
@@ -579,15 +688,17 @@ def execute(args: argparse.Namespace) -> None:
         for record in sorted_results[:top_k]:
             if record["trial"] == best_record["trial"]:
                 continue
+            candidate_key, candidate_group = _resolve_record_dataset(record)
+            candidate_dataset = _pick_primary_dataset(candidate_group)
             candidate_wf = run_walk_forward(
-                primary_dataset.df,
+                candidate_dataset.df,
                 record["params"],
                 fees,
                 risk,
                 train_bars=int(walk_cfg.get("train_bars", 5000)),
                 test_bars=int(walk_cfg.get("test_bars", 2000)),
                 step=int(walk_cfg.get("step", 2000)),
-                htf_df=primary_dataset.htf,
+                htf_df=candidate_dataset.htf,
             )
             wf_cache[record["trial"]] = candidate_wf
             candidate_summaries.append(
@@ -596,14 +707,28 @@ def execute(args: argparse.Namespace) -> None:
                     "score": record.get("score"),
                     "oos_mean": candidate_wf.get("oos_mean"),
                     "params": record.get("params"),
+                    "timeframe": candidate_key[0],
+                    "htf_timeframe": candidate_key[1],
                 }
             )
             candidate_oos = candidate_wf.get("oos_mean", float("-inf"))
             if candidate_oos > best_oos:
                 best_oos = candidate_oos
                 best_record = record
+                best_key = candidate_key
+                best_group = candidate_group
+                primary_dataset = candidate_dataset
                 wf_summary = candidate_wf
         optimisation["best"] = best_record
+
+    candidate_summaries[0] = {
+        "trial": best_record["trial"],
+        "score": best_record.get("score"),
+        "oos_mean": wf_summary.get("oos_mean"),
+        "params": best_record.get("params"),
+        "timeframe": best_key[0],
+        "htf_timeframe": best_key[1],
+    }
 
     wf_summary["candidates"] = candidate_summaries
 
