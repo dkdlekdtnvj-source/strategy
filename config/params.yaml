@@ -17,6 +17,7 @@ risk:
   penalty_trade: 0.25
   penalty_hold: 0.1
   penalty_consecutive_loss: 0.5
+overrides: {}
 objectives:
   - {name: "NetProfit", weight: 1.0}
   - {name: "MaxDD", weight: 0.5}
@@ -26,6 +27,7 @@ search:
   algo: "bayes"
   n_trials: 200
   seed: 42
+  top_k: 5
 walk_forward:
   train_bars: 5000
   test_bars: 2000
@@ -39,3 +41,12 @@ space:
   useMACD: {type: bool}
   useStoch: {type: bool}
   htfEmaLen: {type: int, min: 6, max: 20, step: 1}
+   useAtrTrail: {type: bool}
+   atrTrailLen: {type: int, min: 4, max: 30, step: 2}
+   atrTrailMult: {type: float, min: 1.0, max: 4.0, step: 0.25}
+   usePivotStop: {type: bool}
+   pivotLen: {type: int, min: 3, max: 12, step: 1}
+   useBreakevenStop: {type: bool}
+   breakevenMult: {type: float, min: 0.5, max: 2.5, step: 0.25}
+   useTimeStop: {type: bool}
+   maxHoldBars: {type: int, min: 5, max: 60, step: 5}

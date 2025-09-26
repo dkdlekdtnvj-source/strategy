@@ -118,6 +118,7 @@ def export_best(best: Dict[str, object], wf_summary: Dict[str, object], output_d
             "oos_median": wf_summary.get("oos_median"),
             "count": wf_summary.get("count"),
             "segments": segments_payload,
+            "candidates": wf_summary.get("candidates", []),
         },
     }
     (output_dir / "best.json").write_text(json.dumps(payload, indent=2))

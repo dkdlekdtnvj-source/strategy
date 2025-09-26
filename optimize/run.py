@@ -31,6 +31,59 @@ def load_yaml(path: Path) -> Dict[str, object]:
         return yaml.safe_load(handle) or {}
 
 
+def _prompt_choice(label: str, choices: List[str], default: Optional[str] = None) -> Optional[str]:
+    if not choices:
+        return default
+    while True:
+        print(f"\n{label}:")
+        for idx, value in enumerate(choices, start=1):
+            marker = " (default)" if default == value else ""
+            print(f"  {idx}. {value}{marker}")
+        raw = input("Select option (press Enter for default): ").strip()
+        if not raw:
+            return default or (choices[0] if choices else None)
+        if raw.isdigit():
+            sel = int(raw)
+            if 1 <= sel <= len(choices):
+                return choices[sel - 1]
+        print("Invalid selection. Please try again.")
+
+
+def _prompt_bool(label: str, default: Optional[bool] = None) -> Optional[bool]:
+    suffix = " [y/n]" if default is None else (" [Y/n]" if default else " [y/N]")
+    while True:
+        raw = input(f"{label}{suffix}: ").strip().lower()
+        if not raw and default is not None:
+            return default
+        if raw in {"y", "yes"}:
+            return True
+        if raw in {"n", "no"}:
+            return False
+        if not raw:
+            return default
+        print("Please answer 'y' or 'n'.")
+
+
+def _collect_tokens(items: Iterable[str]) -> List[str]:
+    tokens: List[str] = []
+    for item in items:
+        if not item:
+            continue
+        for token in item.split(","):
+            token = token.strip()
+            if token:
+                tokens.append(token)
+    return tokens
+
+
+def _ensure_dict(root: Dict[str, object], key: str) -> Dict[str, object]:
+    value = root.get(key)
+    if not isinstance(value, dict):
+        value = {}
+        root[key] = value
+    return value
+
+
 @dataclass
 class DatasetSpec:
     symbol: str
@@ -157,6 +210,7 @@ def optimisation_loop(
     objectives: Iterable[object],
     fees: Dict[str, float],
     risk: Dict[str, float],
+    forced_params: Optional[Dict[str, object]] = None,
 ) -> Dict[str, object]:
     search_cfg = params_cfg.get("search", {})
     space = build_space(params_cfg.get("space", {}))
@@ -164,6 +218,7 @@ def optimisation_loop(
     algo = search_cfg.get("algo", "bayes")
     seed = search_cfg.get("seed")
     n_trials = int(search_cfg.get("n_trials", 50))
+    forced_params = forced_params or {}
 
     if algo == "grid":
         sampler = optuna.samplers.GridSampler(grid_choices(space))
@@ -177,6 +232,7 @@ def optimisation_loop(
 
     def objective(trial: optuna.Trial) -> float:
         params = sample_parameters(trial, space)
+        params.update(forced_params)
         dataset_metrics: List[Dict[str, object]] = []
         numeric_metrics: List[Dict[str, float]] = []
 
@@ -224,10 +280,110 @@ def main() -> None:
     parser.add_argument("--backtest", type=Path, default=Path("config/backtest.yaml"))
     parser.add_argument("--output", type=Path, default=Path("reports"))
     parser.add_argument("--data", type=Path, default=Path("data"))
+    parser.add_argument("--symbol", type=str, help="Override symbol to optimise")
+    parser.add_argument("--timeframe", type=str, help="Override lower timeframe")
+    parser.add_argument("--htf", type=str, help="Override higher timeframe for confirmations")
+    parser.add_argument("--start", type=str, help="Override backtest start date (ISO8601)")
+    parser.add_argument("--end", type=str, help="Override backtest end date (ISO8601)")
+    parser.add_argument("--leverage", type=float, help="Override leverage setting")
+    parser.add_argument("--qty-pct", type=float, help="Override quantity percent")
+    parser.add_argument("--interactive", action="store_true", help="Prompt for dataset and toggle selections")
+    parser.add_argument("--enable", action="append", default=[], help="Force-enable boolean parameters (comma separated)")
+    parser.add_argument("--disable", action="append", default=[], help="Force-disable boolean parameters (comma separated)")
+    parser.add_argument("--top-k", type=int, default=0, help="Re-rank top-K trials by walk-forward OOS mean")
     args = parser.parse_args()
 
     params_cfg = load_yaml(args.params)
     backtest_cfg = load_yaml(args.backtest)
+
+    forced_params: Dict[str, object] = dict(params_cfg.get("overrides", {}))
+    for name in _collect_tokens(args.enable):
+        forced_params[name] = True
+    for name in _collect_tokens(args.disable):
+        forced_params[name] = False
+
+    symbol_choices = list(dict.fromkeys(backtest_cfg.get("symbols") or ([params_cfg.get("symbol")] if params_cfg.get("symbol") else [])))
+    timeframe_choices = list(dict.fromkeys(backtest_cfg.get("timeframes") or ([params_cfg.get("timeframe")] if params_cfg.get("timeframe") else [])))
+    htf_default = args.htf or params_cfg.get("htf_timeframe") or backtest_cfg.get("htf_timeframe")
+
+    selected_symbol = args.symbol or params_cfg.get("symbol") or (symbol_choices[0] if symbol_choices else None)
+    selected_timeframe = args.timeframe or params_cfg.get("timeframe") or (timeframe_choices[0] if timeframe_choices else None)
+    selected_htf = htf_default
+
+    if args.interactive:
+        if symbol_choices:
+            selected_symbol = _prompt_choice("Select symbol", symbol_choices, selected_symbol)
+        if timeframe_choices:
+            selected_timeframe = _prompt_choice("Select timeframe", timeframe_choices, selected_timeframe)
+        if htf_default:
+            selected_htf = _prompt_choice("Select higher timeframe", [htf_default] + [tf for tf in timeframe_choices if tf != htf_default], selected_htf) or selected_htf
+
+    if selected_symbol:
+        params_cfg["symbol"] = selected_symbol
+        backtest_cfg["symbols"] = [selected_symbol]
+    if selected_timeframe:
+        params_cfg["timeframe"] = selected_timeframe
+        backtest_cfg["timeframes"] = [selected_timeframe]
+    if selected_htf:
+        params_cfg["htf_timeframe"] = selected_htf
+        backtest_cfg["htf_timeframe"] = selected_htf
+
+    backtest_periods = backtest_cfg.get("periods") or []
+    params_backtest = _ensure_dict(params_cfg, "backtest")
+    if args.start or args.end:
+        start = args.start or params_backtest.get("from") or (backtest_periods[0]["from"] if backtest_periods else None)
+        end = args.end or params_backtest.get("to") or (backtest_periods[0]["to"] if backtest_periods else None)
+        if start and end:
+            params_backtest["from"] = start
+            params_backtest["to"] = end
+            backtest_cfg["periods"] = [{"from": start, "to": end}]
+    elif args.interactive and backtest_periods:
+        labels = [f"{p['from']} → {p['to']}" for p in backtest_periods]
+        default_label = f"{params_backtest.get('from')} → {params_backtest.get('to')}" if params_backtest.get("from") and params_backtest.get("to") else labels[0]
+        choice = _prompt_choice("Select backtest period", labels, default_label)
+        if choice and choice in labels:
+            selected = dict(backtest_periods[labels.index(choice)])
+            params_backtest["from"] = selected["from"]
+            params_backtest["to"] = selected["to"]
+            backtest_cfg["periods"] = [selected]
+    elif params_backtest.get("from") and params_backtest.get("to"):
+        backtest_cfg["periods"] = [{"from": params_backtest["from"], "to": params_backtest["to"]}]
+
+    risk_cfg = _ensure_dict(params_cfg, "risk")
+    backtest_risk = _ensure_dict(backtest_cfg, "risk")
+    if args.leverage is not None:
+        risk_cfg["leverage"] = args.leverage
+        backtest_risk["leverage"] = args.leverage
+    if args.qty_pct is not None:
+        risk_cfg["qty_pct"] = args.qty_pct
+        backtest_risk["qty_pct"] = args.qty_pct
+
+    if args.interactive:
+        leverage_default = risk_cfg.get("leverage")
+        qty_default = risk_cfg.get("qty_pct")
+        lev_input = input(f"Leverage [{leverage_default}]: ").strip()
+        if lev_input:
+            try:
+                leverage_val = float(lev_input)
+                risk_cfg["leverage"] = leverage_val
+                backtest_risk["leverage"] = leverage_val
+            except ValueError:
+                print("Invalid leverage value, keeping previous setting.")
+        qty_input = input(f"Position size %% [{qty_default}]: ").strip()
+        if qty_input:
+            try:
+                qty_val = float(qty_input)
+                risk_cfg["qty_pct"] = qty_val
+                backtest_risk["qty_pct"] = qty_val
+            except ValueError:
+                print("Invalid quantity percentage, keeping previous setting.")
+
+        bool_candidates = [name for name, spec in params_cfg.get("space", {}).items() if spec.get("type") == "bool"]
+        for name in bool_candidates:
+            default_val = forced_params.get(name)
+            decision = _prompt_bool(f"Enable {name}", default_val)
+            if decision is not None:
+                forced_params[name] = decision
 
     datasets = prepare_datasets(params_cfg, backtest_cfg, args.data)
     if not datasets:
@@ -237,13 +393,15 @@ def main() -> None:
     risk = merge_dicts(params_cfg.get("risk", {}), backtest_cfg.get("risk", {}))
 
     objectives = params_cfg.get("objectives", [])
-    optimisation = optimisation_loop(datasets, params_cfg, objectives, fees, risk)
+    optimisation = optimisation_loop(datasets, params_cfg, objectives, fees, risk, forced_params)
 
     walk_cfg = params_cfg.get("walk_forward", {"train_bars": 5000, "test_bars": 2000, "step": 2000})
     primary_dataset = datasets[0]
+
+    best_record = optimisation["best"]
     wf_summary = run_walk_forward(
         primary_dataset.df,
-        optimisation["best"]["params"],
+        best_record["params"],
         fees,
         risk,
         train_bars=int(walk_cfg.get("train_bars", 5000)),
@@ -251,6 +409,51 @@ def main() -> None:
         step=int(walk_cfg.get("step", 2000)),
         htf_df=primary_dataset.htf,
     )
+
+    candidate_summaries = [
+        {
+            "trial": best_record["trial"],
+            "score": best_record.get("score"),
+            "oos_mean": wf_summary.get("oos_mean"),
+            "params": best_record.get("params"),
+        }
+    ]
+
+    top_k = args.top_k or int(params_cfg.get("search", {}).get("top_k", 0))
+    if top_k > 0:
+        sorted_results = sorted(optimisation["results"], key=lambda r: r.get("score", 0.0), reverse=True)
+        best_oos = wf_summary.get("oos_mean", float("-inf"))
+        wf_cache = {best_record["trial"]: wf_summary}
+        for record in sorted_results[:top_k]:
+            if record["trial"] == best_record["trial"]:
+                continue
+            candidate_wf = run_walk_forward(
+                primary_dataset.df,
+                record["params"],
+                fees,
+                risk,
+                train_bars=int(walk_cfg.get("train_bars", 5000)),
+                test_bars=int(walk_cfg.get("test_bars", 2000)),
+                step=int(walk_cfg.get("step", 2000)),
+                htf_df=primary_dataset.htf,
+            )
+            wf_cache[record["trial"]] = candidate_wf
+            candidate_summaries.append(
+                {
+                    "trial": record["trial"],
+                    "score": record.get("score"),
+                    "oos_mean": candidate_wf.get("oos_mean"),
+                    "params": record.get("params"),
+                }
+            )
+            candidate_oos = candidate_wf.get("oos_mean", float("-inf"))
+            if candidate_oos > best_oos:
+                best_oos = candidate_oos
+                best_record = record
+                wf_summary = candidate_wf
+        optimisation["best"] = best_record
+
+    wf_summary["candidates"] = candidate_summaries
 
     generate_reports(
         optimisation["results"],

@@ -50,6 +50,54 @@ def test_run_backtest_deterministic():
     assert first["Valid"] == second["Valid"]
 
 
+def test_event_filter_blocks_trades():
+    data = pd.read_csv("tests/tests_data/sample_ohlcv.csv", parse_dates=["timestamp"], index_col="timestamp")
+    params = {
+        "wtLen": 6,
+        "thr": 0.1,
+        "atrMult": 1.0,
+        "useHTF": False,
+        "useRSI": False,
+        "useMACD": False,
+        "useStoch": False,
+        "useEventFilter": True,
+        "eventWindows": "2023-01-01T00:00:00Z/2023-01-01T01:00:00Z",
+    }
+    fees = {"commission_pct": 0.0, "slippage_ticks": 0}
+    risk = {"leverage": 1, "qty_pct": 10, "min_trades": 0, "min_hold_bars": 0, "max_consecutive_losses": 10}
+
+    results = run_backtest(data, params, fees, risk)
+    assert results["Trades"] == 0
+
+
+def test_time_stop_exit_reason():
+    data = pd.read_csv("tests/tests_data/sample_ohlcv.csv", parse_dates=["timestamp"], index_col="timestamp")
+    params = {
+        "wtLen": 6,
+        "thr": 0.1,
+        "atrMult": 1.0,
+        "useHTF": False,
+        "useRSI": False,
+        "useMACD": False,
+        "useStoch": False,
+        "useTimeStop": True,
+        "maxHoldBars": 2,
+    }
+    fees = {"commission_pct": 0.0, "slippage_ticks": 0}
+    risk = {
+        "leverage": 1,
+        "qty_pct": 10,
+        "min_trades": 0,
+        "min_hold_bars": 0,
+        "max_consecutive_losses": 10,
+    }
+
+    results = run_backtest(data, params, fees, risk)
+    assert results["Trades"] >= 1
+    reasons = [trade.reason for trade in results["TradesList"]]
+    assert any(reason == "time_stop" for reason in reasons)
+
+
 def test_score_metrics_handles_objectives():
     metrics = {
         "NetProfit": 0.5,
