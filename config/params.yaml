@@ -40,26 +40,34 @@ walk_forward:
 space:
   timeframe: {type: choice, values: ["1m", "3m", "5m"]}
   htf: {type: choice, values: ["15m", "1h"]}
-  wtLen: {type: int, min: 6, max: 28, step: 2}
-  thr: {type: float, min: 0.3, max: 1.4, step: 0.1}
-  atrMult: {type: float, min: 0.8, max: 3.0, step: 0.2}
+  oscLen: {type: int, min: 8, max: 32, step: 1}
+  signalLen: {type: int, min: 2, max: 7, step: 1}
+  useSameLen: {type: bool}
+  bbLen: {type: int, min: 10, max: 40, step: 2}
+  kcLen: {type: int, min: 10, max: 40, step: 2}
+  bbMult: {type: float, min: 1.0, max: 2.5, step: 0.1}
+  kcMult: {type: float, min: 0.8, max: 2.0, step: 0.1}
+  fluxLen: {type: int, min: 8, max: 30, step: 1}
+  fluxSmoothLen: {type: int, min: 1, max: 10, step: 1}
+  useFluxHeikin: {type: bool}
+  useDynamicThresh: {type: bool}
+  useSymThreshold: {type: bool}
+  statThreshold: {type: float, min: 20.0, max: 60.0, step: 1.0}
+  buyThreshold: {type: float, min: 20.0, max: 60.0, step: 1.0}
+  sellThreshold: {type: float, min: 20.0, max: 60.0, step: 1.0}
+  dynLen: {type: int, min: 10, max: 60, step: 2}
+  dynMult: {type: float, min: 0.5, max: 2.0, step: 0.1}
   useHTF: {type: bool}
-  htfEmaLen: {type: int, min: 6, max: 32, step: 2}
-  useRSI: {type: bool}
-  useMACD: {type: bool}
-  useStoch: {type: bool}
+  htfEmaLen: {type: int, min: 10, max: 80, step: 5}
   useEventFilter: {type: bool}
-  useAtrStop: {type: bool}
-  useFixedStop: {type: bool}
-  fixedStopPct: {type: float, min: 0.2, max: 3.0, step: 0.2}
   useStopLoss: {type: bool}
   stopLookback: {type: int, min: 3, max: 12, step: 1}
   useAtrTrail: {type: bool}
-  atrTrailLen: {type: int, min: 5, max: 40, step: 5}
+  atrTrailLen: {type: int, min: 5, max: 50, step: 5}
   atrTrailMult: {type: float, min: 1.0, max: 4.0, step: 0.25}
   usePivotStop: {type: bool}
   pivotLen: {type: int, min: 3, max: 12, step: 1}
   useBreakevenStop: {type: bool}
-  breakevenMult: {type: float, min: 0.5, max: 2.5, step: 0.25}
+  breakevenMult: {type: float, min: 0.5, max: 3.0, step: 0.25}
   useTimeStop: {type: bool}
-  maxHoldBars: {type: int, min: 5, max: 80, step: 5}
+  maxHoldBars: {type: int, min: 5, max: 120, step: 5}

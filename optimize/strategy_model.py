@@ -11,14 +11,18 @@ from .metrics import Trade, aggregate_metrics
 
 
 def _ema(series: pd.Series, length: int) -> pd.Series:
+    if length <= 1:
+        return series.copy()
     return series.ewm(span=length, adjust=False).mean()
 
 
 def _rma(series: pd.Series, length: int) -> pd.Series:
+    length = max(length, 1)
     return series.ewm(alpha=1.0 / length, adjust=False).mean()
 
 
 def _atr(df: pd.DataFrame, length: int) -> pd.Series:
+    length = max(length, 1)
     high_low = df["high"] - df["low"]
     high_close = (df["high"] - df["close"].shift()).abs()
     low_close = (df["low"] - df["close"].shift()).abs()
@@ -26,29 +30,54 @@ def _atr(df: pd.DataFrame, length: int) -> pd.Series:
     return _rma(tr, length)
 
 
-def _rsi(series: pd.Series, length: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = np.where(delta > 0, delta, 0.0)
-    down = np.where(delta < 0, -delta, 0.0)
-    roll_up = pd.Series(up, index=series.index).ewm(alpha=1.0 / length, adjust=False).mean()
-    roll_down = pd.Series(down, index=series.index).ewm(alpha=1.0 / length, adjust=False).mean()
-    rs = roll_up / roll_down.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+def _linreg_series(series: pd.Series, length: int) -> pd.Series:
+    if length <= 1:
+        return series.copy()
+
+    idx = np.arange(length, dtype=float)
+
+    def _calc(values: np.ndarray) -> float:
+        if np.isnan(values).any():
+            return np.nan
+        slope, intercept = np.polyfit(idx, values, 1)
+        return slope * (length - 1) + intercept
+
+    return series.rolling(length, min_periods=length).apply(_calc, raw=True)
 
 
-def _stoch(df: pd.DataFrame, length: int = 14) -> pd.Series:
-    lowest = df["low"].rolling(length).min()
-    highest = df["high"].rolling(length).max()
-    k = 100 * (df["close"] - lowest) / (highest - lowest)
-    return k.rolling(3).mean()
+def _heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
+    ha = df.copy()
+    ha_close = (df["open"] + df["high"] + df["low"] + df["close"]) / 4.0
+    ha_open = ha_close.copy()
+    if len(df) > 0:
+        ha_open.iloc[0] = (df["open"].iloc[0] + df["close"].iloc[0]) / 2.0
+    for idx in range(1, len(df)):
+        ha_open.iloc[idx] = (ha_open.iloc[idx - 1] + ha_close.iloc[idx - 1]) / 2.0
+    ha_high = pd.concat([ha_open, ha_close, df["high"]], axis=1).max(axis=1)
+    ha_low = pd.concat([ha_open, ha_close, df["low"]], axis=1).min(axis=1)
+    ha["open"] = ha_open
+    ha["close"] = ha_close
+    ha["high"] = ha_high
+    ha["low"] = ha_low
+    return ha
 
 
-def _macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
-    ema_fast = _ema(series, fast)
-    ema_slow = _ema(series, slow)
-    macd_line = ema_fast - ema_slow
-    signal_line = _ema(macd_line, signal)
-    return pd.DataFrame({"macd": macd_line, "signal": signal_line})
+def _directional_flux(df: pd.DataFrame, length: int) -> pd.Series:
+    length = max(length, 1)
+    high = df["high"]
+    low = df["low"]
+    prev_high = high.shift()
+    prev_low = low.shift()
+    up_move = high - prev_high
+    down_move = prev_low - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = _rma(pd.Series(plus_dm, index=df.index), length)
+    minus_dm = _rma(pd.Series(minus_dm, index=df.index), length)
+    atr = _atr(df, length).replace(0, np.nan)
+    plus_di = 100 * (plus_dm / atr)
+    minus_di = 100 * (minus_dm / atr)
+    return plus_di - minus_di
 
 
 def _estimate_tick(prices: pd.Series) -> float:
@@ -75,9 +104,7 @@ def _parse_event_windows(value: str) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
         return windows
     for segment in value.split(","):
         seg = segment.strip()
-        if not seg:
-            continue
-        if "/" not in seg:
+        if not seg or "/" not in seg:
             continue
         start_str, end_str = seg.split("/", 1)
         try:
@@ -135,30 +162,47 @@ def run_backtest(
     if not required_cols.issubset(df.columns):
         raise ValueError("DataFrame must contain OHLCV columns")
 
-    wt_len = int(params.get("wtLen", 14))
-    thr = float(params.get("thr", 0.6))
+    osc_len = int(params.get("oscLen", 12))
+    signal_len = int(params.get("signalLen", 3))
+    use_same_len = bool(params.get("useSameLen", False))
+    bb_len = int(params.get("bbLen", osc_len if use_same_len else 20))
+    kc_len = int(params.get("kcLen", osc_len if use_same_len else 18))
+    bb_mult = float(params.get("bbMult", 1.4))
+    kc_mult = float(params.get("kcMult", 1.0))
+    flux_len = int(params.get("fluxLen", 14))
+    flux_smooth_len = max(1, int(params.get("fluxSmoothLen", 1)))
+    use_flux_heikin = bool(params.get("useFluxHeikin", True))
+    require_momentum_cross = bool(params.get("requireMomentumCross", True))
+    require_flux_filter = bool(params.get("requireFlux", True))
+
+    use_dynamic_thresh = bool(params.get("useDynamicThresh", True))
+    use_sym_threshold = bool(params.get("useSymThreshold", False))
+    stat_threshold = float(params.get("statThreshold", 38.0))
+    buy_threshold = float(params.get("buyThreshold", 36.0))
+    sell_threshold = float(params.get("sellThreshold", 36.0))
+    dyn_len = int(params.get("dynLen", 21))
+    dyn_mult = float(params.get("dynMult", 1.1))
+
     atr_mult = float(params.get("atrMult", 1.5))
-    use_htf = bool(params.get("useHTF", True))
-    use_rsi = bool(params.get("useRSI", True))
-    use_macd = bool(params.get("useMACD", True))
-    use_stoch = bool(params.get("useStoch", True))
-    htf_ema_len = int(params.get("htfEmaLen", 10))
-    use_event_filter = bool(params.get("useEventFilter", False))
-    event_windows_raw = str(params.get("eventWindows", "")) if use_event_filter else ""
-    use_time_stop = bool(params.get("useTimeStop", False))
-    max_hold_param = int(params.get("maxHoldBars", 0))
-    use_breakeven = bool(params.get("useBreakevenStop", False))
-    breakeven_mult = float(params.get("breakevenMult", 1.0))
-    use_atr_trail = bool(params.get("useAtrTrail", False))
-    atr_trail_len = int(params.get("atrTrailLen", max(1, wt_len)))
-    atr_trail_mult = float(params.get("atrTrailMult", 2.0))
-    use_pivot_stop = bool(params.get("usePivotStop", False))
-    pivot_len = int(params.get("pivotLen", 5))
-    use_atr_stop = bool(params.get("useAtrStop", True))
+    use_atr_stop = bool(params.get("useAtrStop", False))
     use_fixed_stop = bool(params.get("useFixedStop", False))
     fixed_stop_pct = float(params.get("fixedStopPct", 0.0)) / 100.0
     use_stop_loss = bool(params.get("useStopLoss", False))
     stop_lookback = int(params.get("stopLookback", 5))
+    use_pivot_stop = bool(params.get("usePivotStop", False))
+    pivot_len = int(params.get("pivotLen", 5))
+    use_atr_trail = bool(params.get("useAtrTrail", False))
+    atr_trail_len = int(params.get("atrTrailLen", max(1, osc_len)))
+    atr_trail_mult = float(params.get("atrTrailMult", 2.0))
+    use_breakeven = bool(params.get("useBreakevenStop", False))
+    breakeven_mult = float(params.get("breakevenMult", 1.0))
+    use_time_stop = bool(params.get("useTimeStop", False))
+    max_hold_param = int(params.get("maxHoldBars", 0))
+
+    use_htf = bool(params.get("useHTF", True))
+    htf_ema_len = int(params.get("htfEmaLen", 10))
+    use_event_filter = bool(params.get("useEventFilter", False))
+    event_windows_raw = str(params.get("eventWindows", "")) if use_event_filter else ""
 
     commission = float(fees.get("commission_pct", 0.0))
     slippage_ticks = float(fees.get("slippage_ticks", 0.0))
@@ -175,16 +219,28 @@ def run_backtest(
     min_hold_bars = int(risk.get("min_hold_bars", 1))
     max_consec_losses = int(risk.get("max_consecutive_losses", 5))
 
-    hlc3 = (df["high"] + df["low"] + df["close"]) / 3.0
-    ap = _ema(hlc3, wt_len)
-    atr = _atr(df, wt_len).bfill()
-    atr = atr.replace(0, np.nan)
-    wavetrend = (df["close"] - ap) / atr
-    osc = _ema(wavetrend.fillna(0), max(2, wt_len // 2))
+    hl2 = (df["high"] + df["low"]) / 2.0
+    bb_len_effective = osc_len if use_same_len else bb_len
+    kc_len_effective = osc_len if use_same_len else kc_len
+    bb_basis = hl2.rolling(bb_len_effective, min_periods=bb_len_effective).mean()
+    highest = df["high"].rolling(osc_len, min_periods=osc_len).max()
+    lowest = df["low"].rolling(osc_len, min_periods=osc_len).min()
+    channel_mid = (highest + lowest) / 2.0
+    avg_line = (bb_basis + channel_mid) / 2.0
+    atr = _atr(df, osc_len).bfill().replace(0, np.nan)
+    bb_dev = df["close"].rolling(bb_len_effective, min_periods=bb_len_effective).std(ddof=0) * bb_mult
+    kc_range = _atr(df, kc_len_effective) * kc_mult
+    pressure = (bb_dev - kc_range).fillna(0.0)
+    raw_momentum = (df["close"] - avg_line) / atr * 100.0 + pressure
+    osc = _linreg_series(raw_momentum, osc_len)
+    signal_line = osc.rolling(signal_len, min_periods=signal_len).mean()
 
-    rsi = _rsi(df["close"]) if use_rsi else pd.Series(index=df.index, dtype=float)
-    macd = _macd(df["close"]) if use_macd else pd.DataFrame(index=df.index)
-    stoch = _stoch(df) if use_stoch else pd.Series(index=df.index, dtype=float)
+    base_flux_df = _heikin_ashi(df) if use_flux_heikin else df
+    flux_raw = _directional_flux(base_flux_df, flux_len)
+    flux_smoothed = (
+        flux_raw if flux_smooth_len <= 1 else flux_raw.rolling(flux_smooth_len, min_periods=flux_smooth_len).mean()
+    ).fillna(0.0)
+
     htf_ok = (
         _align_htf(df.index, htf_df, htf_ema_len)
         if use_htf
@@ -211,6 +267,7 @@ def run_backtest(
         if (use_atr_trail or use_breakeven)
         else pd.Series(np.nan, index=df.index, dtype=float)
     )
+
     if use_pivot_stop:
         pivot_low_series = _pivot_series(df["low"], pivot_len, pivot_len, is_high=False)
         pivot_high_series = _pivot_series(df["high"], pivot_len, pivot_len, is_high=True)
@@ -228,10 +285,31 @@ def run_backtest(
     tick_size = _estimate_tick(df["close"])
     slippage_value = tick_size * slippage_ticks
 
+    if use_dynamic_thresh:
+        dyn_series = osc.rolling(max(1, dyn_len), min_periods=max(1, dyn_len)).std() * dyn_mult
+        fallback = abs(stat_threshold) if stat_threshold else dyn_series.dropna().mean()
+        if pd.isna(fallback) or fallback == 0:
+            fallback = abs(stat_threshold) if stat_threshold else 1.0
+        dyn_series = dyn_series.fillna(fallback)
+        buy_threshold_series = -dyn_series.abs()
+        sell_threshold_series = dyn_series.abs()
+    else:
+        if use_sym_threshold:
+            buy_val = -abs(stat_threshold)
+            sell_val = abs(stat_threshold)
+        else:
+            buy_val = -abs(buy_threshold)
+            sell_val = abs(sell_threshold)
+        buy_threshold_series = pd.Series(buy_val, index=df.index)
+        sell_threshold_series = pd.Series(sell_val, index=df.index)
+
     returns = pd.Series(0.0, index=df.index)
     trades: List[Trade] = []
     ctx = BacktestContext()
     max_hold_bars = max(0, max_hold_param if use_time_stop else 0)
+
+    osc_prev = osc.shift(1)
+    signal_prev = signal_line.shift(1)
 
     def close_position(exit_time: pd.Timestamp, exit_price: float, reason: str) -> None:
         if ctx.position == 0 or ctx.entry_time is None:
@@ -272,40 +350,30 @@ def run_backtest(
 
     for ts, row in df.iterrows():
         osc_val = osc.loc[ts]
+        sig_val = signal_line.loc[ts]
         atr_val = atr.loc[ts]
-        if np.isnan(osc_val) or np.isnan(atr_val):
+        if np.isnan(osc_val) or np.isnan(sig_val) or np.isnan(atr_val):
             continue
 
-        long_sig = osc_val > thr
-        short_sig = osc_val < -thr
-
-        if use_rsi:
-            rsi_val = rsi.loc[ts]
-            if np.isnan(rsi_val):
-                long_sig = False
-                short_sig = False
+        prev_osc = osc_prev.loc[ts]
+        prev_sig = signal_prev.loc[ts]
+        if np.isnan(prev_osc) or np.isnan(prev_sig):
+            long_sig = False
+            short_sig = False
+        else:
+            cross_up = prev_osc < prev_sig and osc_val > sig_val
+            cross_down = prev_osc > prev_sig and osc_val < sig_val
+            buy_thresh_val = buy_threshold_series.loc[ts]
+            sell_thresh_val = sell_threshold_series.loc[ts]
+            flux_val = flux_smoothed.loc[ts]
+            flux_pass_long = (flux_val > 0) or not require_flux_filter
+            flux_pass_short = (flux_val < 0) or not require_flux_filter
+            if require_momentum_cross:
+                long_sig = bool(cross_up and osc_val <= buy_thresh_val and flux_pass_long)
+                short_sig = bool(cross_down and osc_val >= sell_thresh_val and flux_pass_short)
             else:
-                long_sig = long_sig and rsi_val > 50
-                short_sig = short_sig and rsi_val < 50
-
-        if use_macd:
-            macd_val = macd.loc[ts, "macd"]
-            macd_signal = macd.loc[ts, "signal"]
-            if np.isnan(macd_val) or np.isnan(macd_signal):
-                long_sig = False
-                short_sig = False
-            else:
-                long_sig = long_sig and macd_val > macd_signal
-                short_sig = short_sig and macd_val < macd_signal
-
-        if use_stoch:
-            stoch_val = stoch.loc[ts]
-            if np.isnan(stoch_val):
-                long_sig = False
-                short_sig = False
-            else:
-                long_sig = long_sig and stoch_val > 50
-                short_sig = short_sig and stoch_val < 50
+                long_sig = bool(flux_pass_long)
+                short_sig = bool(flux_pass_short)
 
         htf_pass = bool(htf_ok.loc[ts]) if use_htf else True
         event_blocked = bool(event_mask.loc[ts]) if use_event_filter else False
@@ -331,6 +399,7 @@ def run_backtest(
         atr_trail_val = atr_trail_series.loc[ts] if (use_atr_trail or use_breakeven) else atr_val
         pivot_low_val = pivot_low_series.loc[ts]
         pivot_high_val = pivot_high_series.loc[ts]
+
         if ctx.position > 0:
             stop_price = ctx.entry_price - atr_mult * atr_val if use_atr_stop else None
             guard_price = ctx.entry_price * (1 - liq_buffer_pct)
@@ -374,8 +443,8 @@ def run_backtest(
                         exit_reason = "atr_trail"
                         exit_price = trail_stop
                 if exit_reason is None:
-                    candidate_price: Optional[float] = None
-                    candidate_reason: Optional[str] = None
+                    candidate_price = None
+                    candidate_reason = None
                     if use_fixed_stop and fixed_stop_pct > 0:
                         fixed_price = ctx.entry_price * (1 - fixed_stop_pct)
                         if row["low"] <= fixed_price:

@@ -33,8 +33,9 @@ pip install -r requirements.txt
 
 1. Ensure Binance OHLCV data is cached under `data/` (the CLI will download missing
    ranges automatically).
-2. Adjust optimisation inputs in `config/params.yaml`. The sample profile exposes
-   WaveTrend/ATR thresholds, higher-timeframe confirmation, fade-mode selection,
+2. Adjust optimisation inputs in `config/params.yaml`. The sample profile now sweeps
+   the squeeze-momentum core (oscillator length, signal length, BB/KC lengths & multipliers),
+   directional-flux smoothing, dynamic threshold options, higher-timeframe confirmation,
    and exit modules (ATR stop, fixed % stop, swing/pivot stops, ATR trail,
    breakeven, time stop). You can also pre-define `overrides` to pin any parameter
    on/off before a run and enable Top-K walk-forward re-ranking via `search.top_k`.

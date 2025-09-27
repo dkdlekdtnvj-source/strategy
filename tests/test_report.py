@@ -57,7 +57,7 @@ def test_generate_reports_emits_timeframe_summary(tmp_path: Path) -> None:
         {
             "trial": 0,
             "score": 1.0,
-            "params": {"wtLen": 12, "thr": 0.6},
+            "params": {"oscLen": 12, "statThreshold": 38.0},
             "metrics": {"NetProfit": 0.25, "Sortino": 1.8},
             "datasets": [
                 _make_dataset("BINANCE:ENAUSDT", "1m", "15m", dataset_metrics_a),
@@ -67,7 +67,7 @@ def test_generate_reports_emits_timeframe_summary(tmp_path: Path) -> None:
         {
             "trial": 1,
             "score": 1.2,
-            "params": {"wtLen": 14, "thr": 0.8},
+            "params": {"oscLen": 14, "statThreshold": 42.0},
             "metrics": {"NetProfit": 0.3, "Sortino": 1.7},
             "datasets": [
                 _make_dataset("BINANCE:ENAUSDT", "1m", "15m", dataset_metrics_c),
@@ -75,7 +75,7 @@ def test_generate_reports_emits_timeframe_summary(tmp_path: Path) -> None:
         },
     ]
 
-    best = {"params": {"wtLen": 12, "thr": 0.6}, "metrics": {"NetProfit": 0.25}, "score": 1.0}
+    best = {"params": {"oscLen": 12, "statThreshold": 38.0}, "metrics": {"NetProfit": 0.25}, "score": 1.0}
     wf_summary = {}
 
     generate_reports(results, best, wf_summary, ["NetProfit"], tmp_path)
