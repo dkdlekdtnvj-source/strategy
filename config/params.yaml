@@ -1,0 +1,84 @@
+symbol: "BINANCE:ENAUSDT"
+timeframe: "3m"
+htf_timeframes:
+  - "15m"
+  - "1h"
+backtest:
+  from: "2024-01-01"
+  to: "2025-09-25"
+fees:
+  commission_pct: 0.0005
+  slippage_ticks: 2
+risk:
+  leverage: 10
+  qty_pct: 30
+  liq_buffer_pct: 0.5
+  min_trades: 100
+  min_hold_bars: 1
+  max_consecutive_losses: 5
+  penalty_trade: 0.25
+  penalty_hold: 0.1
+  penalty_consecutive_loss: 0.5
+objectives:
+  - name: NetProfit
+    weight: 1.0
+  - name: Sortino
+    weight: 1.0
+  - name: ProfitFactor
+    weight: 0.75
+  - name: MaxDD
+    weight: 0.5
+search:
+  algo: bayes
+  n_trials: 150
+  seed: 42
+  top_k: 5
+  pruner: asha
+  heartbeat_interval: 60
+  heartbeat_grace_period: 120
+walk_forward:
+  train_bars: 0
+  test_bars: 0
+  step: 0
+llm:
+  enabled: true
+  model: "gemini-2.0-flash-exp"
+  api_key: "AIzaSyDD1i5TbCqfWEMFunoxtvnpnr0VW3XZtsY"
+  api_key_env: "GEMINI_API_KEY"
+  top_n: 12
+  count: 8
+  initial_trials: 60
+space:
+  timeframe: {type: choice, values: ["1m", "3m", "5m"]}
+  htf: {type: choice, values: ["15m", "1h"]}
+  oscLen: {type: int, min: 8, max: 32, step: 1}
+  signalLen: {type: int, min: 2, max: 7, step: 1}
+  useSameLen: {type: bool}
+  bbLen: {type: int, min: 10, max: 40, step: 2}
+  kcLen: {type: int, min: 10, max: 40, step: 2}
+  bbMult: {type: float, min: 1.0, max: 2.5, step: 0.1}
+  kcMult: {type: float, min: 0.8, max: 2.0, step: 0.1}
+  fluxLen: {type: int, min: 8, max: 30, step: 1}
+  fluxSmoothLen: {type: int, min: 1, max: 10, step: 1}
+  useFluxHeikin: {type: bool}
+  useDynamicThresh: {type: bool}
+  useSymThreshold: {type: bool}
+  statThreshold: {type: float, min: 20.0, max: 60.0, step: 1.0}
+  buyThreshold: {type: float, min: 20.0, max: 60.0, step: 1.0}
+  sellThreshold: {type: float, min: 20.0, max: 60.0, step: 1.0}
+  dynLen: {type: int, min: 10, max: 60, step: 2}
+  dynMult: {type: float, min: 0.5, max: 2.0, step: 0.1}
+  useHTF: {type: bool}
+  htfEmaLen: {type: int, min: 10, max: 80, step: 5, requires: useHTF}
+  useEventFilter: {type: bool}
+  useStopLoss: {type: bool}
+  stopLookback: {type: int, min: 3, max: 12, step: 1, requires: useStopLoss}
+  useAtrTrail: {type: bool}
+  atrTrailLen: {type: int, min: 5, max: 50, step: 5, requires: useAtrTrail}
+  atrTrailMult: {type: float, min: 1.0, max: 4.0, step: 0.25, requires: useAtrTrail}
+  usePivotStop: {type: bool}
+  pivotLen: {type: int, min: 3, max: 12, step: 1, requires: usePivotStop}
+  useBreakevenStop: {type: bool}
+  breakevenMult: {type: float, min: 0.5, max: 3.0, step: 0.25, requires: useBreakevenStop}
+  useTimeStop: {type: bool}
+  maxHoldBars: {type: int, min: 5, max: 120, step: 5, requires: useTimeStop}

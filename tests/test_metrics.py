@@ -1,0 +1,164 @@
+import pandas as pd
+import pytest
+
+from optimize.metrics import Trade, aggregate_metrics, equity_curve_from_returns, max_drawdown, score_metrics
+from optimize.strategy_model import run_backtest
+
+
+def _base_params(**overrides):
+    params = {
+        "oscLen": 12,
+        "signalLen": 3,
+        "bbLen": 20,
+        "kcLen": 18,
+        "bbMult": 1.4,
+        "kcMult": 1.0,
+        "fluxLen": 14,
+        "fluxSmoothLen": 1,
+        "useFluxHeikin": True,
+        "useDynamicThresh": False,
+        "useSymThreshold": True,
+        "statThreshold": 38.0,
+        "useHTF": False,
+    }
+    params.update(overrides)
+    return params
+
+
+def test_equity_curve_and_drawdown():
+    returns = pd.Series([0.01, -0.02, 0.015, -0.01])
+    equity = equity_curve_from_returns(returns, initial=1.0)
+    dd = max_drawdown(equity)
+    assert equity.iloc[-1] == pytest.approx(0.9946, rel=1e-3)
+    assert dd <= 0
+
+
+def test_aggregate_metrics_basic():
+    trades = [
+        Trade(pd.Timestamp("2023-01-01"), pd.Timestamp("2023-01-02"), "long", 1.0, 100, 101, 0.01, 0.01, 0.02, -0.01, 5),
+        Trade(pd.Timestamp("2023-01-03"), pd.Timestamp("2023-01-04"), "short", 1.0, 105, 104, 0.01, 0.01, 0.03, -0.02, 4),
+    ]
+    returns = pd.Series([0.01, 0.0, -0.005])
+    metrics = aggregate_metrics(trades, returns)
+    assert metrics["NetProfit"] != 0
+    assert metrics["Trades"] == pytest.approx(2.0)
+    assert metrics["WinRate"] == 1.0
+    assert metrics["ProfitFactor"] > 0
+    assert "WeeklyNetProfit" in metrics
+    assert "Expectancy" in metrics
+
+
+def test_run_backtest_deterministic():
+    data = pd.read_csv("tests/tests_data/sample_ohlcv.csv", parse_dates=["timestamp"], index_col="timestamp")
+    params = _base_params(oscLen=10, signalLen=3)
+    fees = {"commission_pct": 0.0005, "slippage_ticks": 1}
+    risk = {
+        "leverage": 2,
+        "qty_pct": 10,
+        "min_trades": 1,
+        "min_hold_bars": 0,
+        "max_consecutive_losses": 10,
+        "penalty_trade": 0.0,
+        "penalty_hold": 0.0,
+        "penalty_consecutive_loss": 0.0,
+    }
+
+    first = run_backtest(data, params, fees, risk)
+    second = run_backtest(data, params, fees, risk)
+    assert first["Trades"] == second["Trades"]
+    assert first["NetProfit"] == second["NetProfit"]
+    assert first["Valid"] == second["Valid"]
+
+
+def test_event_filter_blocks_trades():
+    data = pd.read_csv("tests/tests_data/sample_ohlcv.csv", parse_dates=["timestamp"], index_col="timestamp")
+    params = _base_params(
+        oscLen=4,
+        signalLen=2,
+        useEventFilter=True,
+        eventWindows="2023-01-01T00:00:00Z/2023-01-01T01:00:00Z",
+    )
+    fees = {"commission_pct": 0.0, "slippage_ticks": 0}
+    risk = {"leverage": 1, "qty_pct": 10, "min_trades": 0, "min_hold_bars": 0, "max_consecutive_losses": 10}
+
+    results = run_backtest(data, params, fees, risk)
+    assert results["Trades"] == 0
+
+
+def test_time_stop_exit_reason():
+    data = pd.read_csv("tests/tests_data/sample_ohlcv.csv", parse_dates=["timestamp"], index_col="timestamp")
+    step = data.index[1] - data.index[0]
+    last_row = data.iloc[-1]
+    extra_index = pd.date_range(
+        data.index[-1] + step,
+        periods=3,
+        freq=step,
+        tz=data.index.tz,
+    )
+    extra = pd.DataFrame({col: last_row[col] for col in data.columns}, index=extra_index)
+    data = pd.concat([data, extra])
+    params = _base_params(
+        oscLen=4,
+        signalLen=2,
+        useTimeStop=True,
+        maxHoldBars=2,
+        useDynamicThresh=False,
+        useSymThreshold=False,
+        statThreshold=0.0,
+        buyThreshold=0.0,
+        sellThreshold=0.0,
+        bbLen=4,
+        kcLen=4,
+        bbMult=1.0,
+        kcMult=1.0,
+        fluxLen=2,
+        useFluxHeikin=False,
+        requireMomentumCross=False,
+    )
+    fees = {"commission_pct": 0.0, "slippage_ticks": 0}
+    risk = {
+        "leverage": 1,
+        "qty_pct": 10,
+        "min_trades": 0,
+        "min_hold_bars": 0,
+        "max_consecutive_losses": 10,
+    }
+
+    results = run_backtest(data, params, fees, risk)
+    assert results["Trades"] >= 1
+    reasons = [trade.reason for trade in results["TradesList"]]
+    assert any(reason == "time_stop" for reason in reasons)
+
+
+def test_score_metrics_handles_objectives():
+    metrics = {
+        "NetProfit": 0.5,
+        "MaxDD": -0.1,
+        "Sortino": 1.2,
+        "WinRate": 0.6,
+        "Trades": 50,
+        "MinTrades": 20,
+        "AvgHoldBars": 5,
+        "MinHoldBars": 1,
+        "MaxConsecutiveLosses": 2,
+        "MaxConsecutiveLossLimit": 5,
+    }
+    score = score_metrics(metrics, ["NetProfit", "MaxDD", "Sortino", "WinRate"])
+    assert score > 0
+
+
+def test_score_metrics_applies_penalties():
+    metrics = {
+        "NetProfit": 0.5,
+        "Trades": 5,
+        "MinTrades": 10,
+        "TradePenalty": 1.0,
+        "AvgHoldBars": 0.5,
+        "MinHoldBars": 1.0,
+        "HoldPenalty": 0.5,
+        "MaxConsecutiveLosses": 4,
+        "MaxConsecutiveLossLimit": 2,
+        "ConsecutiveLossPenalty": 1.0,
+    }
+    score = score_metrics(metrics, ["NetProfit"])
+    assert score < 0.5
