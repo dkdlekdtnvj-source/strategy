@@ -1,7 +1,7 @@
 """Helpers for translating YAML search spaces to Optuna."""
 from __future__ import annotations
 
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Tuple
 
 import numpy as np
 import optuna
@@ -53,3 +53,74 @@ def grid_choices(space: SpaceSpec) -> Dict[str, List[object]]:
         else:
             raise ValueError(f"Unsupported parameter type for grid: {dtype}")
     return grid
+
+
+def _parameter_bounds(name: str, spec: Dict[str, object]) -> Tuple[object, object]:
+    if spec["type"] in {"int", "float"}:
+        return spec.get("min"), spec.get("max")
+    return None, None
+
+
+def clamp_parameter(name: str, value: object, spec: Dict[str, object]) -> object:
+    """Clamp a value to the valid range for a given parameter specification."""
+
+    dtype = spec["type"]
+    if dtype == "int":
+        low, high = _parameter_bounds(name, spec)
+        return int(min(max(int(value), int(low)), int(high)))
+    if dtype == "float":
+        low, high = _parameter_bounds(name, spec)
+        return float(min(max(float(value), float(low)), float(high)))
+    if dtype == "choice":
+        options = list(spec.get("values") or spec.get("options") or [])
+        return value if value in options else options[0]
+    if dtype == "bool":
+        return bool(value)
+    raise ValueError(f"Unsupported parameter type for clamp: {dtype}")
+
+
+def mutate_parameters(
+    params: Dict[str, object],
+    space: SpaceSpec,
+    scale: float = 0.1,
+    rng: np.random.Generator | None = None,
+) -> Dict[str, object]:
+    """Return a neighbour of ``params`` by applying bounded random mutations."""
+
+    rng = rng or np.random.default_rng()
+    mutated = dict(params)
+    for name, spec in space.items():
+        dtype = spec["type"]
+        if dtype in {"int", "float"}:
+            low, high = _parameter_bounds(name, spec)
+            if low is None or high is None:
+                continue
+            span = float(high) - float(low)
+            if span <= 0:
+                continue
+            noise = rng.normal(loc=0.0, scale=scale * span)
+            mutated_val = float(params.get(name, low)) + noise
+            if dtype == "int":
+                mutated_val = round(mutated_val)
+            mutated[name] = clamp_parameter(name, mutated_val, spec)
+        elif dtype == "bool":
+            if rng.random() < scale:
+                mutated[name] = not bool(params.get(name, False))
+        elif dtype == "choice":
+            options = list(spec.get("values") or spec.get("options") or [])
+            if not options:
+                continue
+            current = params.get(name)
+            if rng.random() < scale or current not in options:
+                mutated[name] = rng.choice(options)
+    return mutated
+
+
+__all__ = [
+    "SpaceSpec",
+    "build_space",
+    "sample_parameters",
+    "grid_choices",
+    "mutate_parameters",
+    "clamp_parameter",
+]

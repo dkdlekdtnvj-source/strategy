@@ -98,3 +98,78 @@ def run_walk_forward(
         "count": len(segments),
     }
     return summary
+
+
+def run_purged_kfold(
+    df: pd.DataFrame,
+    params: Dict[str, float | bool],
+    fees: Dict[str, float],
+    risk: Dict[str, float],
+    k: int,
+    embargo: float = 0.0,
+    htf_df: Optional[pd.DataFrame] = None,
+) -> Dict[str, object]:
+    """Execute purged K-fold cross-validation for leak-robust validation."""
+
+    if k <= 1 or df.empty:
+        return {"folds": [], "oos_mean": 0.0, "oos_median": 0.0, "count": 0}
+
+    k = int(k)
+    embargo = max(float(embargo), 0.0)
+    total = len(df)
+    fold_size = max(total // k, 1)
+    embargo_bars = int(total * embargo)
+
+    folds: List[Dict[str, object]] = []
+    oos_scores: List[float] = []
+
+    for fold in range(k):
+        start = fold * fold_size
+        end = total if fold == k - 1 else min(total, (fold + 1) * fold_size)
+        test_idx = slice(start, end)
+
+        embargo_start = max(0, start - embargo_bars)
+        embargo_end = min(total, end + embargo_bars)
+
+        train_parts = []
+        if embargo_start > 0:
+            train_parts.append(df.iloc[:embargo_start])
+        if embargo_end < total:
+            train_parts.append(df.iloc[embargo_end:])
+
+        if not train_parts:
+            continue
+
+        train_df = pd.concat(train_parts)
+        test_df = df.iloc[test_idx]
+
+        if train_df.empty or test_df.empty:
+            continue
+
+        train_htf = htf_df.loc[: train_df.index[-1]] if htf_df is not None else None
+        test_htf = htf_df.loc[: test_df.index[-1]] if htf_df is not None else None
+
+        train_metrics = _clean_metrics(run_backtest(train_df, params, fees, risk, htf_df=train_htf))
+        test_metrics = _clean_metrics(run_backtest(test_df, params, fees, risk, htf_df=test_htf))
+
+        oos_scores.append(test_metrics.get("NetProfit", 0.0))
+        folds.append(
+            {
+                "fold": fold,
+                "train_range": [train_df.index[0].isoformat(), train_df.index[-1].isoformat()],
+                "test_range": [test_df.index[0].isoformat(), test_df.index[-1].isoformat()],
+                "train_metrics": train_metrics,
+                "test_metrics": test_metrics,
+            }
+        )
+
+    series = pd.Series(oos_scores) if oos_scores else pd.Series(dtype=float)
+    return {
+        "folds": folds,
+        "oos_mean": float(series.mean()) if not series.empty else 0.0,
+        "oos_median": float(series.median()) if not series.empty else 0.0,
+        "count": len(folds),
+    }
+
+
+__all__ = ["run_walk_forward", "run_purged_kfold", "SegmentResult"]

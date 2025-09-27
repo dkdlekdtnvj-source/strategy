@@ -125,6 +125,7 @@ def export_best(best: Dict[str, object], wf_summary: Dict[str, object], output_d
 
 
 def export_heatmap(metrics_df: pd.DataFrame, params: List[str], metric: str, output_dir: Path) -> None:
+    _ensure_dir(output_dir)
     if len(params) < 2 or metrics_df.empty or metric not in metrics_df.columns:
         return
     x_param, y_param = params[:2]
@@ -197,17 +198,48 @@ def export_timeframe_summary(dataset_df: pd.DataFrame, output_dir: Path) -> None
     rankings.to_csv(output_dir / "results_timeframe_rankings.csv", index=False)
 
 
+def export_oos_summary(
+    wf_summary: Dict[str, object],
+    cv_summary: Optional[Dict[str, object]],
+    output_dir: Path,
+) -> None:
+    rows: List[Dict[str, object]] = []
+    if wf_summary:
+        rows.append(
+            {
+                "type": "walk_forward",
+                "oos_mean": wf_summary.get("oos_mean"),
+                "oos_median": wf_summary.get("oos_median"),
+                "segments": wf_summary.get("count"),
+            }
+        )
+    if cv_summary:
+        rows.append(
+            {
+                "type": "purged_kfold",
+                "oos_mean": cv_summary.get("oos_mean"),
+                "oos_median": cv_summary.get("oos_median"),
+                "segments": cv_summary.get("count"),
+            }
+        )
+    if rows:
+        pd.DataFrame(rows).to_csv(output_dir / "oos_summary.csv", index=False)
+
+
 def generate_reports(
     results: List[Dict[str, object]],
     best: Dict[str, object],
     wf_summary: Dict[str, object],
     objectives: Iterable[object],
     output_dir: Path,
+    cv_summary: Optional[Dict[str, object]] = None,
 ) -> None:
     agg_df, dataset_df = export_results(results, objectives, output_dir)
     export_best(best, wf_summary, output_dir)
     export_timeframe_summary(dataset_df, output_dir)
+    export_oos_summary(wf_summary, cv_summary, output_dir)
 
     params = list(best.get("params", {}).keys())
     metric_name = next((name for name, _ in _objective_iterator(objectives)), "NetProfit")
-    export_heatmap(agg_df, params, metric_name, output_dir)
+    plots_dir = output_dir / "plots"
+    export_heatmap(agg_df, params, metric_name, plots_dir)
