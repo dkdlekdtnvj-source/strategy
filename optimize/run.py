@@ -436,7 +436,15 @@ def optimisation_loop(
     else:
         sampler = optuna.samplers.TPESampler(seed=seed)
 
-    study = optuna.create_study(direction="maximize", sampler=sampler)
+    pruner_cfg = str(search_cfg.get("pruner", "asha")).lower()
+    if pruner_cfg in {"none", "off", "disable"}:
+        pruner = optuna.pruners.NopPruner()
+    elif pruner_cfg in {"median", "medianpruner"}:
+        pruner = optuna.pruners.MedianPruner()
+    else:
+        pruner = optuna.pruners.SuccessiveHalvingPruner()
+
+    study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
     results: List[Dict[str, object]] = []
 
     def objective(trial: optuna.Trial) -> float:
@@ -462,6 +470,11 @@ def optimisation_loop(
         aggregated = combine_metrics(numeric_metrics)
         score = score_metrics(aggregated, objectives)
 
+        trial.report(score, step=len(selected_datasets))
+        pruned = False
+        if trial.should_prune():
+            pruned = True
+
         record = {
             "trial": trial.number,
             "params": params,
@@ -470,8 +483,11 @@ def optimisation_loop(
             "score": score,
             "valid": aggregated.get("Valid", True),
             "dataset_key": {"timeframe": key[0], "htf_timeframe": key[1]},
+            "pruned": pruned,
         }
         results.append(record)
+        if pruned:
+            raise optuna.TrialPruned()
         return score
 
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)

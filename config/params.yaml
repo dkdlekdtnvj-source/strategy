@@ -33,6 +33,7 @@ search:
   n_trials: 150
   seed: 42
   top_k: 5
+  pruner: asha
 walk_forward:
   train_bars: 0
   test_bars: 0

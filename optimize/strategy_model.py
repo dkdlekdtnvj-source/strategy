@@ -162,6 +162,9 @@ def run_backtest(
     if not required_cols.issubset(df.columns):
         raise ValueError("DataFrame must contain OHLCV columns")
 
+    params = dict(params)
+    params["momFadeBars"] = 1
+
     osc_len = int(params.get("oscLen", 12))
     signal_len = int(params.get("signalLen", 3))
     use_same_len = bool(params.get("useSameLen", False))

@@ -52,7 +52,6 @@ dfh          = input.bool(true, title="Heikin-Ashi 변환 사용" , group=gDF)
 gExit = "3. 청산 옵션"
 exitOpposite = input.bool(true , title="반대 신호 청산"      , group=gExit)
 useMomFade   = input.bool(false, title="모멘텀 페이드 청산"  , group=gExit)
-momFadeBars  = input.int (1   , title="페이드 관찰 봉 수"    , group=gExit, minval=1, maxval=10)
 fadeMode     = input.string("VN", title="페이드 모드", options=["VN", "Legacy"], group=gExit)
 useAtrStop   = input.bool(true , title="ATR 손절 사용"        , group=gExit)
 atrStopMult  = input.float(1.5 , title="ATR 손절 Mult"        , group=gExit, minval=0.1, maxval=5.0, step=0.1)
@@ -116,7 +115,7 @@ float momentum    = ta.linreg(close - mean, len, 0)
 float momSignal   = ta.sma(momentum, sig)
 
 // --- 페이드 감지 ---
-int fadeWindow = math.max(momFadeBars, 1)
+int fadeWindow = 1
 bool fadeMagnitudeDown = ta.falling(math.abs(momentum), fadeWindow)
 bool fadeLongCond_vn  = momentum > 0 and fadeMagnitudeDown
 bool fadeShortCond_vn = momentum < 0 and fadeMagnitudeDown
