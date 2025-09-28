@@ -1,0 +1,272 @@
+//@version=5
+strategy("Mixbabe Fusion Alpha", overlay=true, pyramiding=0, initial_capital=5000,
+    commission_type=strategy.commission.percent, commission_value=0.05,
+    default_qty_type=strategy.percent_of_equity, default_qty_value=5,
+    calc_on_every_tick=true)
+
+// === 입력 설정 ===
+// 구조 기반 입력
+var string VERSION_NOTE = "Fusion of Squeeze Momentum + SMC + UT Bot concepts"
+group_structure = "구조 기반 파라미터"
+leftInternal  = input.int(2, "내부 스윙 Left", minval=1, maxval=5, group=group_structure)
+rightInternal = input.int(2, "내부 스윙 Right", minval=1, maxval=5, group=group_structure)
+obLookback    = input.int(8, "Order Block 탐색 봉 수", minval=2, maxval=50, group=group_structure)
+fvgLookback   = input.int(20, "최근 FVG 저장 최대 봉 수", minval=5, maxval=100, group=group_structure)
+rangeLookback = input.int(50, "프리미엄/디스카운트 산출 Lookback", minval=10, maxval=200, group=group_structure)
+
+// 스퀴즈 모멘텀
+group_sqz = "스퀴즈 모멘텀"
+sqzLen      = input.int(20, "모멘텀 길이", minval=5, maxval=100, group=group_sqz)
+sqzSignal   = input.int(5, "신호 EMA", minval=1, maxval=20, group=group_sqz)
+sqzBbLen    = input.int(20, "볼린저 길이", minval=5, maxval=100, group=group_sqz)
+sqzBbMult   = input.float(2.0, "볼린저 배수", minval=0.1, maxval=5.0, step=0.1, group=group_sqz)
+sqzKcLen    = input.int(20, "켈트너 길이", minval=5, maxval=100, group=group_sqz)
+sqzKcMult   = input.float(1.5, "켈트너 배수", minval=0.1, maxval=5.0, step=0.1, group=group_sqz)
+dynLen      = input.int(34, "동적 임계값 길이", minval=5, maxval=200, group=group_sqz)
+dynMult     = input.float(1.2, "동적 임계값 배수", minval=0.5, maxval=5.0, step=0.1, group=group_sqz)
+
+// UT Bot 기반 베이스라인
+group_ut = "UT Bot 베이스라인"
+utAtrLen = input.int(14, "ATR 길이", minval=1, maxval=100, group=group_ut)
+utMult   = input.float(1.5, "ATR 배수", minval=0.1, maxval=10.0, step=0.1, group=group_ut)
+utSrcSel = input.string("CLOSE", "신호 소스", options=["CLOSE", "HL2", "HLC3", "OHLC4"], group=group_ut)
+
+// 리스크 설정
+group_risk = "리스크 관리"
+atrLen    = input.int(14, "ATR 길이", minval=5, maxval=100, group=group_risk)
+slMult    = input.float(1.8, "손절 ATR 배수", minval=0.5, maxval=10.0, step=0.1, group=group_risk)
+tpMult    = input.float(2.4, "익절 ATR 배수", minval=0.5, maxval=10.0, step=0.1, group=group_risk)
+useBreakeven = input.bool(true, "50% 진행 시 본전 이동", group=group_risk)
+
+// === 보조 함수 ===
+float getSource(string mode) =>
+    switch mode
+        "HL2"   => hl2
+        "HLC3"  => hlc3
+        "OHLC4" => ohlc4
+        => close
+
+// === 스퀴즈 모멘텀 계산 ===
+float sqzBasis = ta.sma(close, sqzBbLen)
+float sqzDev   = ta.stdev(close, sqzBbLen)
+float bbUpper  = sqzBasis + sqzDev * sqzBbMult
+float bbLower  = sqzBasis - sqzDev * sqzBbMult
+float kcBasis  = ta.ema(close, sqzKcLen)
+float kcRange  = ta.atr(sqzKcLen) * sqzKcMult
+float kcUpper  = kcBasis + kcRange
+float kcLower  = kcBasis - kcRange
+
+bool squeezeOn  = bbUpper < kcUpper and bbLower > kcLower
+bool squeezeOff = bbUpper > kcUpper and bbLower < kcLower
+bool squeezeFire = squeezeOn[1] and squeezeOff
+float momentumRaw = ta.linreg(close, sqzLen, 0) - ta.linreg(close, sqzLen, 1)
+float momentum = ta.ema(momentumRaw, sqzSignal)
+float dynThreshold = ta.stdev(momentumRaw, dynLen) * dynMult
+bool momentumBull = momentum > dynThreshold
+bool momentumBear = momentum < -dynThreshold
+
+plot(momentum, color=momentum >= 0 ? color.new(color.lime, 0) : color.new(color.red, 0), title="Momentum")
+plot(dynThreshold, color=color.new(color.gray, 70), title="+Threshold")
+plot(-dynThreshold, color=color.new(color.gray, 70), title="-Threshold")
+plotshape(squeezeFire, title="Squeeze Release", location=location.bottom, style=shape.triangleup, size=size.tiny, color=color.orange)
+
+// === UT Bot 스타일 베이스라인 ===
+float utSrc = getSource(utSrcSel)
+float utAtr = ta.atr(utAtrLen)
+float bullCalc = utSrc - utAtr * utMult
+float bearCalc = utSrc + utAtr * utMult
+var float utStop = na
+var bool utBull = true
+float prevStop = na(utStop[1]) ? bullCalc : utStop[1]
+bool prevBull = na(utBull[1]) ? true : utBull[1]
+bool nextBull = prevBull
+if close > prevStop and not prevBull
+    nextBull := true
+else if close < prevStop and prevBull
+    nextBull := false
+float nextStop = nextBull ? math.max(bullCalc, prevStop) : math.min(bearCalc, prevStop)
+utStop := nextStop
+utBull := nextBull
+plot(utStop, color=utBull ? color.new(color.lime, 0) : color.new(color.red, 0), linewidth=2, title="UT Trailing Stop")
+
+// === SMC 구조 분석 ===
+float pivHigh = ta.pivothigh(high, leftInternal, rightInternal)
+float pivLow  = ta.pivotlow(low, leftInternal, rightInternal)
+var float swingHigh = na
+var float swingLow  = na
+var float prevSwingHigh = na
+var float prevSwingLow  = na
+if not na(pivHigh)
+    prevSwingHigh := swingHigh
+    swingHigh := pivHigh
+if not na(pivLow)
+    prevSwingLow := swingLow
+    swingLow := pivLow
+
+bool bullishBOS = not na(prevSwingHigh) and close > prevSwingHigh and close[1] <= prevSwingHigh
+bool bearishBOS = not na(prevSwingLow) and close < prevSwingLow and close[1] >= prevSwingLow
+var string bias = "NEUTRAL"
+string priorBias = nz(bias[1], "NEUTRAL")
+if bullishBOS
+    bias := "BULLISH"
+else if bearishBOS
+    bias := "BEARISH"
+else
+    bias := priorBias
+bool choch = bias != priorBias
+
+plotshape(bullishBOS, title="BOS Long", location=location.abovebar, color=color.new(color.lime, 0), style=shape.labelup, size=size.tiny, text="BOS↑")
+plotshape(bearishBOS, title="BOS Short", location=location.belowbar, color=color.new(color.red, 0), style=shape.labeldown, size=size.tiny, text="BOS↓")
+plotshape(choch, title="CHoCH", location=location.bottom, color=color.new(color.yellow, 0), style=shape.circle, size=size.tiny)
+
+// === Order Block 탐색 ===
+var float bullObHigh = na
+var float bullObLow  = na
+var int   bullObBar  = na
+var float bearObHigh = na
+var float bearObLow  = na
+var int   bearObBar  = na
+if bullishBOS
+    float tmpHigh = na
+    float tmpLow = na
+    for i = 1 to obLookback
+        if close[i] < open[i]
+            tmpHigh := high[i]
+            tmpLow  := low[i]
+            break
+    bullObHigh := tmpHigh
+    bullObLow  := tmpLow
+    bullObBar  := bar_index
+if bearishBOS
+    float tmpHighS = na
+    float tmpLowS = na
+    for i = 1 to obLookback
+        if close[i] > open[i]
+            tmpHighS := high[i]
+            tmpLowS  := low[i]
+            break
+    bearObHigh := tmpHighS
+    bearObLow  := tmpLowS
+    bearObBar  := bar_index
+
+var line bullObLineHigh = na
+var line bullObLineLow  = na
+if not na(bullObHigh) and not na(bullObLow)
+    if not na(bullObLineHigh)
+        line.delete(bullObLineHigh)
+    if not na(bullObLineLow)
+        line.delete(bullObLineLow)
+    bullObLineHigh := line.new(bullObBar, bullObHigh, bar_index, bullObHigh, extend=extend.right, color=color.new(color.lime, 60))
+    bullObLineLow  := line.new(bullObBar, bullObLow, bar_index, bullObLow, extend=extend.right, color=color.new(color.lime, 80))
+var line bearObLineHigh = na
+var line bearObLineLow  = na
+if not na(bearObHigh) and not na(bearObLow)
+    if not na(bearObLineHigh)
+        line.delete(bearObLineHigh)
+    if not na(bearObLineLow)
+        line.delete(bearObLineLow)
+    bearObLineHigh := line.new(bearObBar, bearObHigh, bar_index, bearObHigh, extend=extend.right, color=color.new(color.red, 80))
+    bearObLineLow  := line.new(bearObBar, bearObLow, bar_index, bearObLow, extend=extend.right, color=color.new(color.red, 60))
+
+bool inBullOb = not na(bullObHigh) and not na(bullObLow) and close <= bullObHigh and close >= bullObLow
+bool inBearOb = not na(bearObHigh) and not na(bearObLow) and close >= bearObLow and close <= bearObHigh
+
+// === FVG 탐지 ===
+var float bullFvgHigh = na
+var float bullFvgLow  = na
+var int   bullFvgBar  = na
+var float bearFvgHigh = na
+var float bearFvgLow  = na
+var int   bearFvgBar  = na
+bool bullFvg = bar_index > 2 and low[1] > high[2]
+bool bearFvg = bar_index > 2 and high[1] < low[2]
+if bullFvg
+    bullFvgHigh := low[1]
+    bullFvgLow  := high[2]
+    bullFvgBar  := bar_index
+if bearFvg
+    bearFvgHigh := low[2]
+    bearFvgLow  := high[1]
+    bearFvgBar  := bar_index
+
+var line bullFvgLineHigh = na
+var line bullFvgLineLow  = na
+if not na(bullFvgHigh) and not na(bullFvgLow)
+    if not na(bullFvgLineHigh)
+        line.delete(bullFvgLineHigh)
+    if not na(bullFvgLineLow)
+        line.delete(bullFvgLineLow)
+    bullFvgLineHigh := line.new(bullFvgBar, bullFvgHigh, bar_index, bullFvgHigh, extend=extend.right, color=color.new(color.aqua, 70))
+    bullFvgLineLow  := line.new(bullFvgBar, bullFvgLow, bar_index, bullFvgLow, extend=extend.right, color=color.new(color.aqua, 90))
+var line bearFvgLineHigh = na
+var line bearFvgLineLow  = na
+if not na(bearFvgHigh) and not na(bearFvgLow)
+    if not na(bearFvgLineHigh)
+        line.delete(bearFvgLineHigh)
+    if not na(bearFvgLineLow)
+        line.delete(bearFvgLineLow)
+    bearFvgLineHigh := line.new(bearFvgBar, bearFvgHigh, bar_index, bearFvgHigh, extend=extend.right, color=color.new(color.purple, 90))
+    bearFvgLineLow  := line.new(bearFvgBar, bearFvgLow, bar_index, bearFvgLow, extend=extend.right, color=color.new(color.purple, 70))
+
+bool bullFvgActive = not na(bullFvgHigh) and not na(bullFvgLow) and not na(bullFvgBar) and bar_index - bullFvgBar <= fvgLookback
+bool bearFvgActive = not na(bearFvgHigh) and not na(bearFvgLow) and not na(bearFvgBar) and bar_index - bearFvgBar <= fvgLookback
+bool inBullFvg = bullFvgActive and close <= bullFvgHigh and close >= bullFvgLow
+bool inBearFvg = bearFvgActive and close >= bearFvgLow and close <= bearFvgHigh
+
+// === 프리미엄/디스카운트 구간 ===
+float recentHigh = ta.highest(high, rangeLookback)
+float recentLow  = ta.lowest(low, rangeLookback)
+float equilibrium = (recentHigh + recentLow) / 2.0
+bool isDiscount = close <= equilibrium
+bool isPremium  = close >= equilibrium
+
+// === 진입 조건 ===
+bool rawLongSetup = bias == "BULLISH" and utBull and (inBullOb or inBullFvg) and momentumBull
+bool rawShortSetup = bias == "BEARISH" and not utBull and (inBearOb or inBearFvg) and momentumBear
+
+// 필터 최소화: 다만 프리미엄/디스카운트 컨텍스트만 확인
+bool longSetup = rawLongSetup and isDiscount
+bool shortSetup = rawShortSetup and isPremium
+
+float tradeAtr = ta.atr(atrLen)
+float longStop = close - tradeAtr * slMult
+float longTarget = close + tradeAtr * tpMult
+float shortStop = close + tradeAtr * slMult
+float shortTarget = close - tradeAtr * tpMult
+
+if longSetup and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+if shortSetup and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+
+if strategy.position_size > 0
+    strategy.exit("L-Exit", "Long", stop=longStop, limit=longTarget)
+    if useBreakeven
+        float halfWay = strategy.position_avg_price + (longTarget - strategy.position_avg_price) * 0.5
+        if close >= halfWay
+            strategy.exit("L-BE", "Long", stop=strategy.position_avg_price)
+if strategy.position_size < 0
+    strategy.exit("S-Exit", "Short", stop=shortStop, limit=shortTarget)
+    if useBreakeven
+        float halfWayS = strategy.position_avg_price - (strategy.position_avg_price - shortTarget) * 0.5
+        if close <= halfWayS
+            strategy.exit("S-BE", "Short", stop=strategy.position_avg_price)
+
+// === 시각화 ===
+hline(equilibrium, "균형가", color=color.new(color.yellow, 70))
+plotshape(longSetup, location=location.belowbar, color=color.new(color.lime, 0), style=shape.triangleup, text="LONG", size=size.small, title="Long Setup")
+plotshape(shortSetup, location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, text="SHORT", size=size.small, title="Short Setup")
+
+// === 알림 ===
+alertcondition(longSetup, title="Fusion Long", message="Mixbabe Fusion Alpha: Long setup 감지")
+alertcondition(shortSetup, title="Fusion Short", message="Mixbabe Fusion Alpha: Short setup 감지")
+
+// === 정보 패널 ===
+var table hud = table.new(position.bottom_right, 1, 6)
+if barstate.islast
+    table.cell(hud, 0, 0, "Mixbabe Fusion Alpha", text_color=color.white, text_size=size.normal)
+    table.cell(hud, 0, 1, "Bias: " + bias, text_color=bias == "BULLISH" ? color.lime : bias == "BEARISH" ? color.red : color.silver)
+    table.cell(hud, 0, 2, "UTTrend: " + (utBull ? "Bull" : "Bear"), text_color=utBull ? color.lime : color.red)
+    table.cell(hud, 0, 3, "Momentum: " + (momentumBull ? "Bull" : momentumBear ? "Bear" : "Neutral"))
+    table.cell(hud, 0, 4, "Context: " + (isDiscount ? "Discount" : isPremium ? "Premium" : "EQ"))
+    table.cell(hud, 0, 5, VERSION_NOTE)
