@@ -1,0 +1,1117 @@
+//@version=5
+strategy("Mixbabe Apex Fusion", shorttitle="Mixbabe Apex", overlay=true,
+    initial_capital=1000,
+    currency=currency.USD,
+    pyramiding=0,
+    commission_type=strategy.commission.percent,
+    commission_value=0.06,
+    calc_on_every_tick=true,
+    calc_on_order_fills=true,
+    process_orders_on_close=true,
+    max_lines_count=500,
+    max_labels_count=500)
+
+// ╔═══════════════════════════════════════════════════════════════════════════════╗
+// ║ KASIA Base Module v3.0 (Risk/Guard/Wallet/Time/PnL/KCAS)                       ║
+// ║  • 본 스크립트 내에서 통합 운용되며 tradeAllowed, qty 계산 함수, HUD 제공    ║
+// ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+var string kasia_GRP_TIME   = 'A) 시간 & 세션'
+var string kasia_GRP_RISK   = 'B) 리스크 & 월렛'
+var string kasia_GRP_GUARD  = 'C) 자본/거래 가드'
+var string kasia_GRP_CTX    = 'D) 시장 컨텍스트 필터'
+var string kasia_GRP_FILTER = 'E) 모멘텀/구조 필터'
+var string kasia_GRP_SL     = 'F) 손절 & 유틸'
+var string kasia_GRP_HUD    = 'G) HUD & 디버거'
+var string kasia_GRP_DEMO   = 'H) 데모 테스트 로직'
+
+int kasia_startYear   = input.int(2024, '백테스트 시작 연도', minval=2017, group=kasia_GRP_TIME)
+int kasia_startMonth  = input.int(1,   '백테스트 시작 월',   minval=1, maxval=12, group=kasia_GRP_TIME)
+int kasia_startDay    = input.int(1,   '백테스트 시작 일',   minval=1, maxval=31, group=kasia_GRP_TIME)
+int kasia_startTs     = timestamp(syminfo.timezone, kasia_startYear, kasia_startMonth, kasia_startDay, 0, 0)
+
+bool kasia_useSessionFilter = input.bool(true, '기본 세션 필터 사용', group=kasia_GRP_TIME)
+string kasia_primarySession = input.session('0830-0200', '기본 세션 (거래소 로컬)', group=kasia_GRP_TIME)
+
+bool kasia_useKstSession = input.bool(true, '한국시간 세션 필터', group=kasia_GRP_TIME)
+string kasia_kstSession   = input.session('0930-0200', '한국시간 세션', group=kasia_GRP_TIME)
+
+bool kasia_useDayFilter = input.bool(true, '요일 필터 사용', group=kasia_GRP_TIME)
+bool kasia_monOk = input.bool(true,  '월', inline='kasia_dow1', group=kasia_GRP_TIME)
+bool kasia_tueOk = input.bool(true,  '화', inline='kasia_dow1', group=kasia_GRP_TIME)
+bool kasia_wedOk = input.bool(true,  '수', inline='kasia_dow1', group=kasia_GRP_TIME)
+bool kasia_thuOk = input.bool(true,  '목', inline='kasia_dow1', group=kasia_GRP_TIME)
+bool kasia_friOk = input.bool(true,  '금', inline='kasia_dow2', group=kasia_GRP_TIME)
+bool kasia_satOk = input.bool(false, '토', inline='kasia_dow2', group=kasia_GRP_TIME)
+bool kasia_sunOk = input.bool(false, '일', inline='kasia_dow2', group=kasia_GRP_TIME)
+
+string kasia_positionSizingMode = input.string('Risk-Based', '사이징 엔진', options=['Risk-Based', 'Notional'], group=kasia_GRP_RISK)
+string kasia_riskSizingType     = input.string('Fixed Fractional', '리스크 포지션 타입', options=['Fixed Fractional', 'Fixed Lot'], group=kasia_GRP_RISK)
+float kasia_baseRiskPct        = input.float(0.6, '기본 리스크 %', step=0.05, minval=0.1, group=kasia_GRP_RISK)
+float kasia_fixedContractSize  = input.float(1.0, '고정 계약 수량', step=0.1, minval=0.001, group=kasia_GRP_RISK)
+
+float kasia_leverage           = input.float(15.0, '레버리지', minval=1, maxval=50, step=0.1, group=kasia_GRP_RISK)
+int kasia_slipTicks            = input.int(1, '슬리피지 (틱)', minval=0, maxval=50, group=kasia_GRP_RISK)
+var float kasia_tickSize       = syminfo.mintick
+float kasia_slipBuffer         = kasia_tickSize * kasia_slipTicks
+
+string kasia_notionalSizingType  = input.string('Equity %', '노션널 기준', options=['Fixed USD', 'Equity %'], group=kasia_GRP_RISK)
+float kasia_notionalSizingValue = input.float(80.0, '노션널 값 (USD 또는 %)', minval=1, group=kasia_GRP_RISK)
+
+bool kasia_useWallet            = input.bool(true, '월렛 시스템 사용', group=kasia_GRP_RISK)
+float kasia_profitReservePct    = input.float(20.0, '수익 적립 비율 %', minval=0.0, maxval=100.0, step=1.0, group=kasia_GRP_RISK) / 100.0
+bool kasia_applyReserveToSizing = input.bool(true, '적립금 제외 후 사이징', group=kasia_GRP_RISK)
+float kasia_minTradableCapital  = input.float(300.0, '최소 거래 가능 자본 ($)', minval=50, group=kasia_GRP_RISK)
+
+bool kasia_useDrawdownScaling = input.bool(true, '드로우다운 리스크 축소', group=kasia_GRP_RISK)
+float kasia_drawdownTriggerPct = input.float(7.0, '드로우다운 트리거 %', minval=1, maxval=50, group=kasia_GRP_RISK)
+float kasia_drawdownRiskScale  = input.float(0.5, '드로우다운 리스크 배율', minval=0.1, maxval=1.0, step=0.05, group=kasia_GRP_RISK)
+
+bool kasia_usePerfAdaptiveRisk = input.bool(true, '성과 적응 리스크 (PAR)', group=kasia_GRP_RISK)
+int kasia_parLookback          = input.int(6, 'PAR 거래 수 집계', minval=2, maxval=20, group=kasia_GRP_RISK)
+int kasia_parMinTrades         = input.int(3, 'PAR 최소 거래 수', minval=1, maxval=20, group=kasia_GRP_RISK)
+float kasia_parHotWinRate      = input.float(65.0, '핫스트릭 승률 %', minval=40, maxval=90, step=0.5, group=kasia_GRP_RISK)
+float kasia_parColdWinRate     = input.float(35.0, '콜드스트릭 승률 %', minval=5, maxval=60, step=0.5, group=kasia_GRP_RISK)
+float kasia_parHotRiskMult     = input.float(1.25, '핫스트릭 리스크 배율', minval=1.0, maxval=2.0, step=0.05, group=kasia_GRP_RISK)
+float kasia_parColdRiskMult    = input.float(0.35, '콜드스트릭 리스크 배율', minval=0.0, maxval=1.0, step=0.05, group=kasia_GRP_RISK)
+bool kasia_parPauseOnCold      = input.bool(true, '콜드스트릭 시 진입 중지', group=kasia_GRP_RISK)
+
+bool kasia_useCapitalGuard     = input.bool(true, '자본 가드', group=kasia_GRP_GUARD)
+float kasia_capitalGuardPct    = input.float(18.0, '자본 드로우다운 한도 %', minval=1, maxval=100, step=1, group=kasia_GRP_GUARD)
+
+bool kasia_useDailyLossGuard   = input.bool(true, '일일 손실 가드', group=kasia_GRP_GUARD)
+float kasia_dailyLossThreshold = input.float(80, '일일 손실 한도 ($)', minval=10, group=kasia_GRP_GUARD)
+bool kasia_useDailyProfitLock  = input.bool(true, '일일 이익 잠금', group=kasia_GRP_GUARD)
+float kasia_dailyProfitTarget  = input.float(120, '일일 이익 목표 ($)', minval=0, group=kasia_GRP_GUARD)
+bool kasia_useWeeklyProfitLock = input.bool(true, '주간 이익 잠금', group=kasia_GRP_GUARD)
+float kasia_weeklyProfitTarget = input.float(250, '주간 이익 목표 ($)', minval=0, group=kasia_GRP_GUARD)
+
+bool kasia_useLossStreakGuard  = input.bool(true, '연패 중지 가드', group=kasia_GRP_GUARD)
+int kasia_maxConsecutiveLosses = input.int(3, '최대 연속 손실 횟수', minval=1, maxval=10, group=kasia_GRP_GUARD)
+
+bool kasia_useGuardExit        = input.bool(true, '청산가 선제 가드', group=kasia_GRP_GUARD)
+float kasia_maintenanceMarginPct = input.float(0.5, '유지 증거금 %', minval=0.1, step=0.05, group=kasia_GRP_GUARD)
+int kasia_preemptTicks         = input.int(8, '선제 청산 틱', minval=0, maxval=50, group=kasia_GRP_GUARD)
+
+int kasia_maxDailyLosses = input.int(3, '일일 최대 손실 거래 수', minval=0, group=kasia_GRP_GUARD)
+float kasia_maxWeeklyDD  = input.float(9.0, '주간 최대 드로우다운 %', minval=0, group=kasia_GRP_GUARD)
+int kasia_maxGuardFires  = input.int(4, '청산 가드 최대 발동', minval=0, group=kasia_GRP_GUARD)
+
+bool kasia_useVolatilityGuard  = input.bool(true, 'ATR 변동성 가드', group=kasia_GRP_GUARD)
+int kasia_volatilityLookback  = input.int(50, 'ATR %% 기간', minval=10, maxval=200, group=kasia_GRP_GUARD)
+float kasia_volatilityLowerPct = input.float(0.15, 'ATR %% 하한', minval=0.05, step=0.05, group=kasia_GRP_GUARD)
+float kasia_volatilityUpperPct = input.float(2.5, 'ATR %% 상한', minval=0.2, step=0.05, group=kasia_GRP_GUARD)
+
+bool kasia_useRegimeFilter = input.bool(true, '상위봉 레짐 필터', group=kasia_GRP_CTX)
+string kasia_htfTf         = input.timeframe('240', '상위봉 타임프레임', group=kasia_GRP_CTX)
+int kasia_htfEmaLen        = input.int(120, '상위봉 EMA 길이', minval=20, maxval=400, group=kasia_GRP_CTX)
+int kasia_htfAdxLen        = input.int(14, '상위봉 ADX 길이', minval=5, maxval=50, group=kasia_GRP_CTX)
+float kasia_htfAdxTh       = input.float(22, '상위봉 ADX 임계값', minval=5, maxval=50, step=0.5, group=kasia_GRP_CTX)
+int kasia_htfRsiLen        = input.int(21, '상위봉 RSI 길이', minval=5, maxval=50, group=kasia_GRP_CTX)
+
+bool kasia_useVWAPFilter   = input.bool(true, 'VWAP 필터', group=kasia_GRP_CTX)
+bool kasia_useMicroTrend   = input.bool(true, 'EMA 클라우드 (Micro Trend)', group=kasia_GRP_CTX)
+int kasia_emaFastLenBase   = input.int(21, 'EMA 빠른선 기본', minval=5, maxval=100, group=kasia_GRP_CTX)
+int kasia_emaSlowLenBase   = input.int(55, 'EMA 느린선 기본', minval=10, maxval=200, group=kasia_GRP_CTX)
+
+bool kasia_useRangeFilter  = input.bool(true, '레인지 차단', group=kasia_GRP_CTX)
+int kasia_rangeLen         = input.int(36, '레인지 기준 봉수', minval=5, maxval=200, group=kasia_GRP_CTX)
+float kasia_rangeAtrMult   = input.float(1.4, '레인지 ATR 배수', minval=0.5, maxval=5, step=0.1, group=kasia_GRP_CTX)
+
+bool kasia_useDistanceGuard = input.bool(true, '가격 이격 가드', group=kasia_GRP_CTX)
+int kasia_distanceAtrLen   = input.int(21, '이격 ATR 길이', minval=5, maxval=200, group=kasia_GRP_CTX)
+float kasia_distanceMaxAtr = input.float(2.4, '최대 이격 (ATR)', minval=0.5, maxval=5, step=0.1, group=kasia_GRP_CTX)
+
+bool kasia_useSlopeFilter = input.bool(true, 'EMA 기울기 필터', group=kasia_GRP_CTX)
+int kasia_slopeLookback  = input.int(8, '기울기 룩백', minval=1, maxval=50, group=kasia_GRP_CTX)
+float kasia_slopeMinPct  = input.float(0.06, '최소 기울기 (%)', minval=0.0, maxval=1.0, step=0.01, group=kasia_GRP_CTX)
+
+bool kasia_useTrendBias = input.bool(true, '추세 EMA 필터', group=kasia_GRP_CTX)
+int kasia_trendLenBase  = input.int(200, '추세 EMA 기본', minval=20, maxval=400, group=kasia_GRP_CTX)
+bool kasia_useConfBias  = input.bool(true, '확인 EMA 필터', group=kasia_GRP_CTX)
+int kasia_confLenBase   = input.int(55, '확인 EMA 기본', minval=10, maxval=300, group=kasia_GRP_CTX)
+
+bool kasia_useMomConfirm = input.bool(true, '모멘텀 확증 사용', group=kasia_GRP_FILTER)
+int kasia_bbLen          = input.int(18, '볼린저 길이', minval=10, maxval=100, group=kasia_GRP_FILTER)
+float kasia_bbMult       = input.float(1.2, '볼린저 배수', minval=0.5, maxval=5, step=0.1, group=kasia_GRP_FILTER)
+int kasia_kcLen          = input.int(21, '켈트너 길이', minval=10, maxval=100, group=kasia_GRP_FILTER)
+
+bool kasia_useCHoCH  = input.bool(true, 'CHoCH 확인 사용', group=kasia_GRP_FILTER)
+int kasia_pL         = input.int(2, '피벗 좌', minval=1, maxval=20, group=kasia_GRP_FILTER)
+int kasia_pR         = input.int(3, '피벗 우', minval=1, maxval=20, group=kasia_GRP_FILTER)
+
+bool kasia_useVolumeFilter = input.bool(true, '거래량 스파이크 필터', group=kasia_GRP_FILTER)
+int kasia_volumeLookback   = input.int(34, '거래량 평균 기간', minval=5, maxval=200, group=kasia_GRP_FILTER)
+float kasia_volumeMultiplier = input.float(1.3, '거래량 배수', minval=1.0, maxval=5.0, step=0.1, group=kasia_GRP_FILTER)
+
+bool kasia_useCandleFilter = input.bool(true, '캔들 모멘텀 필터', group=kasia_GRP_FILTER)
+float kasia_candleBodyRatio = input.float(55, '몸통 비율 %', minval=10, maxval=99, step=1, group=kasia_GRP_FILTER)
+
+bool kasia_useRSIShift = input.bool(true, '상위봉 RSI 바이어스', group=kasia_GRP_FILTER)
+float kasia_rsiBullBand = input.float(52, 'RSI 강세 기준', minval=40, maxval=70, step=0.5, group=kasia_GRP_FILTER)
+float kasia_rsiBearBand = input.float(48, 'RSI 약세 기준', minval=30, maxval=60, step=0.5, group=kasia_GRP_FILTER)
+
+bool kasia_useEquitySlopeFilter = input.bool(true, '순자산 기울기 필터', group=kasia_GRP_FILTER)
+int kasia_eqSlopeLen = input.int(120, '순자산 기울기 길이', minval=20, maxval=500, group=kasia_GRP_FILTER)
+
+bool kasia_usePivotSL    = input.bool(true, '피벗 손절 사용', group=kasia_GRP_SL)
+int kasia_pivLeft        = input.int(4, '피벗 좌', minval=1, maxval=20, group=kasia_GRP_SL)
+int kasia_pivRight       = input.int(4, '피벗 우', minval=1, maxval=20, group=kasia_GRP_SL)
+int kasia_atrLenSL       = input.int(14, 'ATR 손절 길이', minval=5, maxval=100, group=kasia_GRP_SL)
+float kasia_atrBufferMult = input.float(0.25, 'ATR 버퍼 배수', minval=0, maxval=2, step=0.05, group=kasia_GRP_SL)
+
+bool kasia_showHUD      = input.bool(true, 'HUD 표시', group=kasia_GRP_HUD)
+bool kasia_showDebugger = input.bool(true, '디버거 표시', group=kasia_GRP_HUD)
+string kasia_hudPosition = input.string('Top Right', 'HUD 위치', options=['Top Left', 'Top Right', 'Middle Left', 'Middle Right', 'Bottom Left', 'Bottom Right'], group=kasia_GRP_HUD)
+
+bool kasia_eodClose = input.bool(true, '세션 종료 시 청산', group=kasia_GRP_HUD)
+string kasia_eodTime = input.string('02:05', '청산 시간 (HH:MM)', group=kasia_GRP_HUD)
+
+bool kasia_useDemoLogic = input.bool(false, '데모 RSI 진입 로직 실행', group=kasia_GRP_DEMO)
+int kasia_rsiLenDemo    = input.int(14, '데모 RSI 길이', group=kasia_GRP_DEMO, minval=1)
+
+bool kasia_isBacktestWindow = time >= kasia_startTs
+bool kasia_sessionAllowed   = not kasia_useSessionFilter or not na(time(timeframe.period, kasia_primarySession))
+bool kasia_kstAllowed       = not kasia_useKstSession or not na(time(timeframe.period, kasia_kstSession, 'Asia/Seoul'))
+
+string kasia_getDayChar() =>
+    dayofweek == dayofweek.monday    ? '월' :
+    dayofweek == dayofweek.tuesday   ? '화' :
+    dayofweek == dayofweek.wednesday ? '수' :
+    dayofweek == dayofweek.thursday  ? '목' :
+    dayofweek == dayofweek.friday    ? '금' :
+    dayofweek == dayofweek.saturday  ? '토' : '일'
+
+string kasia_dayChar = kasia_getDayChar()
+
+bool kasia_isDayEnabled(string d) =>
+    (d == '월' and kasia_monOk) or
+    (d == '화' and kasia_tueOk) or
+    (d == '수' and kasia_wedOk) or
+    (d == '목' and kasia_thuOk) or
+    (d == '금' and kasia_friOk) or
+    (d == '토' and kasia_satOk) or
+    (d == '일' and kasia_sunOk)
+
+bool kasia_isDayAllowed = not kasia_useDayFilter or kasia_isDayEnabled(kasia_dayChar)
+
+var float kasia_tradableCapital = strategy.initial_capital
+var float kasia_withdrawable    = 0.0
+var float kasia_peakEquity      = strategy.initial_capital
+
+if barstate.isconfirmed
+    float kasia_newProfit = strategy.netprofit - nz(strategy.netprofit[1])
+    if kasia_useWallet and kasia_newProfit > 0
+        kasia_withdrawable += kasia_newProfit * kasia_profitReservePct
+    float kasia_effectiveEquity = kasia_useWallet and kasia_applyReserveToSizing ? strategy.equity - kasia_withdrawable : strategy.equity
+    kasia_tradableCapital := math.max(kasia_effectiveEquity, strategy.initial_capital * 0.01)
+    kasia_peakEquity := math.max(kasia_peakEquity, strategy.equity)
+
+float kasia_currentDD     = kasia_peakEquity > 0 ? (kasia_peakEquity - strategy.equity) / kasia_peakEquity * 100 : 0.0
+float kasia_scaledRiskPct = kasia_useDrawdownScaling and kasia_currentDD > kasia_drawdownTriggerPct ? kasia_baseRiskPct * kasia_drawdownRiskScale : kasia_baseRiskPct
+
+var float kasia_recentTradeResults[] = array.new_float()
+var int kasia_lastClosedCount = 0
+int kasia_closedCount = strategy.closedtrades
+if kasia_usePerfAdaptiveRisk and kasia_closedCount > kasia_lastClosedCount
+    for kasia_idx = kasia_lastClosedCount to kasia_closedCount - 1
+        float kasia_tradeProfit = strategy.closedtrades.profit(kasia_idx)
+        array.push(kasia_recentTradeResults, kasia_tradeProfit)
+        if array.size(kasia_recentTradeResults) > kasia_parLookback
+            array.shift(kasia_recentTradeResults)
+    kasia_lastClosedCount := kasia_closedCount
+else if not kasia_usePerfAdaptiveRisk
+    kasia_lastClosedCount := kasia_closedCount
+
+int kasia_recentTrades = array.size(kasia_recentTradeResults)
+int kasia_recentWins   = 0
+int kasia_recentLosses = 0
+if kasia_usePerfAdaptiveRisk and kasia_recentTrades > 0
+    for kasia_i = 0 to kasia_recentTrades - 1
+        float kasia_plTrade = array.get(kasia_recentTradeResults, kasia_i)
+        kasia_recentWins   += kasia_plTrade > 0 ? 1 : 0
+        kasia_recentLosses += kasia_plTrade < 0 ? 1 : 0
+
+float kasia_recentWinRate = kasia_usePerfAdaptiveRisk and kasia_recentTrades > 0 ? kasia_recentWins / kasia_recentTrades * 100.0 : na
+bool kasia_isHotStreak    = kasia_usePerfAdaptiveRisk and not na(kasia_recentWinRate) and kasia_recentTrades >= kasia_parMinTrades and kasia_recentWinRate >= kasia_parHotWinRate
+bool kasia_isColdStreak   = kasia_usePerfAdaptiveRisk and not na(kasia_recentWinRate) and kasia_recentTrades >= kasia_parMinTrades and kasia_recentWinRate <= kasia_parColdWinRate
+float kasia_perfRiskMult  = kasia_usePerfAdaptiveRisk ? (kasia_isHotStreak ? kasia_parHotRiskMult : kasia_isColdStreak ? kasia_parColdRiskMult : 1.0) : 1.0
+float kasia_finalRiskPct  = kasia_scaledRiskPct * kasia_perfRiskMult
+
+string kasia_parStateLabel = not kasia_usePerfAdaptiveRisk ? 'OFF' : kasia_isHotStreak ? 'HOT' : kasia_isColdStreak ? 'COLD' : 'NEUTRAL'
+string kasia_parWinLabel   = na(kasia_recentWinRate) ? '-' : str.tostring(kasia_recentWinRate, '##.##') + '%'
+
+bool kasia_useVolGuardRange(float atrPctVal) => not kasia_useVolatilityGuard or (atrPctVal >= kasia_volatilityLowerPct and atrPctVal <= kasia_volatilityUpperPct)
+
+var float kasia_dailyStartCapital = kasia_tradableCapital
+var float kasia_dailyPeakCapital  = kasia_tradableCapital
+var bool  kasia_isGuardHalted     = false
+varip int kasia_guardFiredTotal   = 0
+varip int kasia_dailyLosses       = 0
+varip float kasia_weekPeakEquity  = strategy.initial_capital
+varip float kasia_weekStartEquity = strategy.initial_capital
+varip int kasia_lossStreak        = 0
+
+float kasia_atrStop = ta.atr(kasia_atrLenSL)
+float kasia_atrPct  = close != 0 ? ta.atr(kasia_volatilityLookback) / close * 100.0 : 0.0
+bool kasia_isVolatilityOK = kasia_useVolGuardRange(kasia_atrPct)
+
+bool kasia_aNewDay = ta.change(dayofmonth) != 0
+if kasia_aNewDay
+    kasia_dailyStartCapital := kasia_tradableCapital
+    kasia_dailyPeakCapital  := kasia_tradableCapital
+    kasia_isGuardHalted     := false
+    kasia_dailyLosses       := 0
+
+bool kasia_aNewWeek = ta.change(weekofyear) != 0
+if kasia_aNewWeek
+    kasia_weekPeakEquity  := strategy.equity
+    kasia_weekStartEquity := strategy.equity
+else
+    kasia_weekPeakEquity := math.max(kasia_weekPeakEquity, strategy.equity)
+
+kasia_dailyPeakCapital := math.max(kasia_dailyPeakCapital, kasia_tradableCapital)
+float kasia_dailyPnl  = kasia_tradableCapital - kasia_dailyStartCapital
+float kasia_weeklyDD  = kasia_weekPeakEquity > 0 ? (kasia_weekPeakEquity - strategy.equity) / kasia_weekPeakEquity * 100.0 : 0.0
+float kasia_weeklyPnl = strategy.equity - kasia_weekStartEquity
+
+bool kasia_isDailyLossBreached = kasia_useDailyLossGuard and kasia_dailyPnl <= -kasia_dailyLossThreshold
+if kasia_isDailyLossBreached
+    kasia_isGuardHalted := true
+
+bool kasia_dailyProfitReached  = kasia_useDailyProfitLock and kasia_dailyPnl >= kasia_dailyProfitTarget
+bool kasia_weeklyProfitReached = kasia_useWeeklyProfitLock and kasia_weeklyPnl >= kasia_weeklyProfitTarget
+
+if strategy.losstrades > strategy.losstrades[1]
+    kasia_dailyLosses += 1
+    kasia_lossStreak  += 1
+if strategy.wintrades > strategy.wintrades[1]
+    kasia_lossStreak := 0
+
+float kasia_guard_price(float entryPrice, int direction, float qty) =>
+    qty == 0.0 ? entryPrice : (
+        float initialMargin = (qty * entryPrice) / kasia_leverage,
+        float maintMargin   = (qty * entryPrice) * (kasia_maintenanceMarginPct / 100.0),
+        float offset        = (initialMargin - maintMargin) / qty,
+        direction == 1 ? entryPrice - offset : entryPrice + offset)
+
+if kasia_useGuardExit and strategy.position_size != 0
+    float kasia_guardEntryPrice = strategy.position_avg_price
+    int kasia_guardDirection    = strategy.position_size > 0 ? 1 : -1
+    float kasia_guardQty        = math.abs(strategy.position_size)
+    float kasia_liqPrice        = kasia_guard_price(kasia_guardEntryPrice, kasia_guardDirection, kasia_guardQty)
+    float kasia_preemptPrice    = kasia_guardDirection == 1 ? kasia_liqPrice + kasia_preemptTicks * kasia_tickSize : kasia_liqPrice - kasia_preemptTicks * kasia_tickSize
+    bool kasia_hitGuard         = kasia_guardDirection == 1 ? low <= kasia_preemptPrice : high >= kasia_preemptPrice
+    if kasia_hitGuard
+        strategy.close_all(comment='Guard Exit')
+        kasia_guardFiredTotal += 1
+
+bool kasia_stop_by_losses  = kasia_maxDailyLosses > 0 and kasia_dailyLosses >= kasia_maxDailyLosses
+bool kasia_stop_by_dd      = kasia_maxWeeklyDD > 0 and kasia_weeklyDD >= kasia_maxWeeklyDD
+bool kasia_stop_by_guard   = kasia_maxGuardFires > 0 and kasia_guardFiredTotal >= kasia_maxGuardFires
+bool kasia_stop_by_capital = kasia_tradableCapital < kasia_minTradableCapital
+bool kasia_stop_by_streak  = kasia_useLossStreakGuard and kasia_lossStreak >= kasia_maxConsecutiveLosses
+bool kasia_stop_by_perf    = kasia_usePerfAdaptiveRisk and kasia_parPauseOnCold and kasia_isColdStreak
+bool kasia_stop_by_profit  = kasia_dailyProfitReached or kasia_weeklyProfitReached
+
+bool kasia_isCapitalBreached = kasia_useCapitalGuard and strategy.equity < strategy.initial_capital * (1 - kasia_capitalGuardPct / 100.0)
+
+float kasia_htfRsiSeries = request.security(syminfo.tickerid, kasia_htfTf, ta.rsi(close, kasia_htfRsiLen))
+float kasia_htfRsi       = kasia_htfRsiSeries[1]
+
+float kasia_emaFast = ta.ema(close, kasia_emaFastLenBase)
+float kasia_emaSlow = ta.ema(close, kasia_emaSlowLenBase)
+bool kasia_microTrendLong  = not kasia_useMicroTrend or kasia_emaFast > kasia_emaSlow
+bool kasia_microTrendShort = not kasia_useMicroTrend or kasia_emaFast < kasia_emaSlow
+
+float kasia_maTrend = ta.ema(close, kasia_trendLenBase)
+float kasia_maConf  = ta.ema(close, kasia_confLenBase)
+bool kasia_trendBiasLongOK  = not kasia_useTrendBias or close > kasia_maTrend
+bool kasia_trendBiasShortOK = not kasia_useTrendBias or close < kasia_maTrend
+bool kasia_confBiasLongOK   = not kasia_useConfBias or close > kasia_maConf
+bool kasia_confBiasShortOK  = not kasia_useConfBias or close < kasia_maConf
+
+float kasia_prevTrend = nz(kasia_maTrend[kasia_slopeLookback], kasia_maTrend)
+float kasia_slopePct  = kasia_maTrend != 0 ? (kasia_maTrend - kasia_prevTrend) / kasia_maTrend * 100.0 : 0.0
+bool kasia_slopeOK_L  = not kasia_useSlopeFilter or kasia_slopePct >= kasia_slopeMinPct
+bool kasia_slopeOK_S  = not kasia_useSlopeFilter or kasia_slopePct <= -kasia_slopeMinPct
+
+float kasia_rangeHigh = ta.highest(high, kasia_rangeLen)
+float kasia_rangeLow  = ta.lowest(low, kasia_rangeLen)
+float kasia_rangeAtr  = ta.atr(kasia_rangeLen)
+bool kasia_isRanging  = (kasia_rangeHigh - kasia_rangeLow) < kasia_rangeAtr * kasia_rangeAtrMult
+bool kasia_rangeOK    = not kasia_useRangeFilter or not kasia_isRanging
+
+float kasia_htfEmaSeries = request.security(syminfo.tickerid, kasia_htfTf, ta.ema(close, kasia_htfEmaLen))
+float kasia_htfEma       = kasia_htfEmaSeries[1]
+float kasia_htfAdxSeries = request.security(syminfo.tickerid, kasia_htfTf, ta.adx(kasia_htfAdxLen))
+float kasia_htfAdx       = kasia_htfAdxSeries[1]
+
+bool kasia_htfLong  = not kasia_useRegimeFilter or (close > kasia_htfEma and kasia_htfAdx > kasia_htfAdxTh)
+bool kasia_htfShort = not kasia_useRegimeFilter or (close < kasia_htfEma and kasia_htfAdx > kasia_htfAdxTh)
+
+float kasia_vwap = ta.vwap
+bool kasia_vwapLong  = not kasia_useVWAPFilter or close >= kasia_vwap
+bool kasia_vwapShort = not kasia_useVWAPFilter or close <= kasia_vwap
+
+float kasia_atrDistance   = ta.atr(kasia_distanceAtrLen)
+float kasia_vwDistance    = kasia_atrDistance > 0 ? math.abs(close - kasia_vwap) / kasia_atrDistance : 0.0
+float kasia_trendDistance = kasia_atrDistance > 0 ? math.abs(close - kasia_maTrend) / kasia_atrDistance : 0.0
+
+bool kasia_distanceOK_L = not kasia_useDistanceGuard or (kasia_vwDistance <= kasia_distanceMaxAtr and kasia_trendDistance <= kasia_distanceMaxAtr)
+bool kasia_distanceOK_S = kasia_distanceOK_L
+
+float kasia_bbBasis = ta.sma(close, kasia_bbLen)
+float kasia_bbDev   = kasia_bbMult * ta.stdev(close, kasia_bbLen)
+float kasia_bbUpper = kasia_bbBasis + kasia_bbDev
+float kasia_bbLower = kasia_bbBasis - kasia_bbDev
+float kasia_kcRange = ta.atr(kasia_kcLen) * kasia_bbMult
+bool kasia_squeezeOn = (kasia_bbUpper - kasia_bbLower) < kasia_kcRange
+float kasia_mom      = ta.linreg(close - kasia_bbBasis, 14, 0)
+bool kasia_momOK_L   = not kasia_useMomConfirm or (kasia_mom > 0 and (not kasia_squeezeOn or ta.crossover(kasia_mom, 0)))
+bool kasia_momOK_S   = not kasia_useMomConfirm or (kasia_mom < 0 and (not kasia_squeezeOn or ta.crossunder(kasia_mom, 0)))
+
+float kasia_ph = ta.pivothigh(high, kasia_pL, kasia_pR)
+float kasia_pl = ta.pivotlow(low, kasia_pL, kasia_pR)
+float kasia_lastHigh = ta.valuewhen(not na(kasia_ph), kasia_ph, 0)
+float kasia_lastLow  = ta.valuewhen(not na(kasia_pl), kasia_pl, 0)
+bool kasia_bullCHoCH = not na(kasia_lastHigh) and not na(kasia_lastLow) and close > kasia_lastHigh and low > kasia_lastLow
+bool kasia_bearCHoCH = not na(kasia_lastHigh) and not na(kasia_lastLow) and close < kasia_lastLow and high < kasia_lastHigh
+bool kasia_chochOK_L = not kasia_useCHoCH or kasia_bullCHoCH
+bool kasia_chochOK_S = not kasia_useCHoCH or kasia_bearCHoCH
+
+float kasia_avgVolume     = ta.sma(volume, kasia_volumeLookback)
+bool kasia_isVolumeSpike = kasia_avgVolume > 0 ? volume >= kasia_avgVolume * kasia_volumeMultiplier : false
+bool kasia_volumeOK      = not kasia_useVolumeFilter or kasia_isVolumeSpike
+
+float kasia_bodySize = math.abs(close - open)
+float kasia_fullSize = high - low
+bool kasia_isMomentumCandle = kasia_fullSize > 0 and kasia_bodySize / kasia_fullSize * 100 >= kasia_candleBodyRatio
+bool kasia_candleOK         = not kasia_useCandleFilter or kasia_isMomentumCandle
+
+bool kasia_rsiShiftOK_L = not kasia_useRSIShift or kasia_htfRsi >= kasia_rsiBullBand
+bool kasia_rsiShiftOK_S = not kasia_useRSIShift or kasia_htfRsi <= kasia_rsiBearBand
+
+float kasia_eqSlope = ta.linreg(strategy.equity, kasia_eqSlopeLen, 0) - ta.linreg(strategy.equity, kasia_eqSlopeLen, 1)
+bool kasia_equitySlopeOK_L = not kasia_useEquitySlopeFilter or kasia_eqSlope >= 0
+bool kasia_equitySlopeOK_S = not kasia_useEquitySlopeFilter or kasia_eqSlope <= 0
+
+bool kasia_contextLongOK  = kasia_microTrendLong and kasia_trendBiasLongOK and kasia_confBiasLongOK and kasia_slopeOK_L and kasia_rangeOK and kasia_vwapLong and kasia_distanceOK_L and kasia_momOK_L and kasia_chochOK_L and kasia_volumeOK and kasia_candleOK and kasia_rsiShiftOK_L and kasia_htfLong and kasia_equitySlopeOK_L
+bool kasia_contextShortOK = kasia_microTrendShort and kasia_trendBiasShortOK and kasia_confBiasShortOK and kasia_slopeOK_S and kasia_rangeOK and kasia_vwapShort and kasia_distanceOK_S and kasia_momOK_S and kasia_chochOK_S and kasia_volumeOK and kasia_candleOK and kasia_rsiShiftOK_S and kasia_htfShort and kasia_equitySlopeOK_S
+
+var float kasia_pivLowCache  = na
+var float kasia_pivHighCache = na
+if kasia_usePivotSL
+    float kasia_lastPivotLow  = ta.valuewhen(not na(ta.pivotlow(low, kasia_pivLeft, kasia_pivRight)), ta.pivotlow(low, kasia_pivLeft, kasia_pivRight), 0)
+    float kasia_lastPivotHigh = ta.valuewhen(not na(ta.pivothigh(high, kasia_pivLeft, kasia_pivRight)), ta.pivothigh(high, kasia_pivLeft, kasia_pivRight), 0)
+    if not na(kasia_lastPivotLow)
+        kasia_pivLowCache := kasia_lastPivotLow - kasia_atrBufferMult * kasia_atrStop
+    if not na(kasia_lastPivotHigh)
+        kasia_pivHighCache := kasia_lastPivotHigh + kasia_atrBufferMult * kasia_atrStop
+
+float kasia_calcNotionalQty() =>
+    float kasia_baseEquity = kasia_tradableCapital
+    float kasia_sizeUsd = kasia_notionalSizingType == 'Fixed USD' ? kasia_notionalSizingValue : kasia_baseEquity * (kasia_notionalSizingValue / 100.0)
+    float kasia_riskScale = kasia_baseRiskPct > 0 ? kasia_finalRiskPct / kasia_baseRiskPct : 1.0
+    float kasia_adjSizeUsd = math.max(kasia_sizeUsd * kasia_riskScale, 0.0)
+    close > 0 ? (kasia_adjSizeUsd * kasia_leverage) / close : na
+
+float kasia_calcRiskQty(float stopDistance) =>
+    na(stopDistance) or stopDistance <= 0 ? na : (kasia_riskSizingType == 'Fixed Fractional' ? (kasia_tradableCapital * kasia_finalRiskPct / 100.0) / stopDistance : kasia_fixedContractSize)
+
+float kasia_calcPositionQty(float stopDistance) =>
+    float kasia_qtyRisk = kasia_calcRiskQty(stopDistance)
+    float kasia_qtyNotional = kasia_calcNotionalQty()
+    float kasia_qtySelected = kasia_positionSizingMode == 'Risk-Based' ? kasia_qtyRisk : kasia_qtyNotional
+    na(kasia_qtySelected) ? 0.0 : math.max(kasia_qtySelected, 0.0)
+
+bool kasia_isTimeAllowed = kasia_isBacktestWindow and kasia_sessionAllowed and kasia_kstAllowed and kasia_isDayAllowed
+bool kasia_haltReasons   = kasia_isCapitalBreached or kasia_isGuardHalted or kasia_stop_by_losses or kasia_stop_by_dd or kasia_stop_by_guard or kasia_stop_by_capital or kasia_stop_by_streak or kasia_stop_by_perf or kasia_stop_by_profit
+bool kasia_canTrade      = kasia_isTimeAllowed and not kasia_haltReasons and kasia_isVolatilityOK
+if kasia_useDemoLogic
+    float kasia_demoRsi = ta.rsi(close, kasia_rsiLenDemo)
+    bool kasia_longCond  = ta.crossover(kasia_demoRsi, 30)
+    bool kasia_shortCond = ta.crossunder(kasia_demoRsi, 70)
+
+    if strategy.position_size == 0 and kasia_canTrade
+        if kasia_longCond and kasia_contextLongOK
+            float kasia_stopLevel = kasia_usePivotSL and not na(kasia_pivLowCache) ? math.min(close - kasia_atrStop, kasia_pivLowCache) : close - kasia_atrStop
+            float kasia_stopDist  = close - kasia_stopLevel
+            float kasia_qty       = kasia_calcPositionQty(kasia_stopDist + kasia_slipBuffer)
+            if kasia_qty > 0
+                strategy.entry('Demo Long', strategy.long, qty=kasia_qty)
+                strategy.exit('Demo Long SL', from_entry='Demo Long', stop=kasia_stopLevel)
+        if kasia_shortCond and kasia_contextShortOK
+            float kasia_stopLevelS = kasia_usePivotSL and not na(kasia_pivHighCache) ? math.max(close + kasia_atrStop, kasia_pivHighCache) : close + kasia_atrStop
+            float kasia_stopDistS  = kasia_stopLevelS - close
+            float kasia_qtyS       = kasia_calcPositionQty(kasia_stopDistS + kasia_slipBuffer)
+            if kasia_qtyS > 0
+                strategy.entry('Demo Short', strategy.short, qty=kasia_qtyS)
+                strategy.exit('Demo Short SL', from_entry='Demo Short', stop=kasia_stopLevelS)
+
+if kasia_eodClose and strategy.position_size != 0
+    int kasia_eodHour = str.tonumber(str.substring(kasia_eodTime, 0, 2))
+    int kasia_eodMinute = str.tonumber(str.substring(kasia_eodTime, 3, 5))
+    if hour == kasia_eodHour and minute >= kasia_eodMinute
+        strategy.close_all(comment='EOD Close')
+
+var string MODULE_VERSION = '3.0'
+var bool   MODULE_canTrade = na
+var float  MODULE_tradableCapital = na
+var float  MODULE_finalRiskPct = na
+var bool   MODULE_contextLongOK = na
+var bool   MODULE_contextShortOK = na
+var float  MODULE_slipBuffer = na
+var float  MODULE_atrStop = na
+
+MODULE_canTrade := kasia_canTrade
+MODULE_tradableCapital := kasia_tradableCapital
+MODULE_finalRiskPct := kasia_finalRiskPct
+MODULE_contextLongOK := kasia_contextLongOK
+MODULE_contextShortOK := kasia_contextShortOK
+MODULE_slipBuffer := kasia_slipBuffer
+MODULE_atrStop := kasia_atrStop
+
+f_str(val) => str.tostring(val, format.mintick)
+
+// ╔═══════════════════════════════════════════════════════════════════════════════╗
+// ║ Section 4: Best SMA Finder 통합                                               ║
+// ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+string grpSma = 'I) 최적 SMA 컨텍스트'
+string smaStrategyType = input.string('Buy & Sell', 'SMA 전략 타입', options=['Buy & Sell', 'Long Only'], group=grpSma)
+int smaMinLen = input.int(20, 'SMA 최소 길이', minval=5, maxval=400, group=grpSma)
+int smaMaxLenInput = input.int(220, 'SMA 최대 길이', minval=10, maxval=1000, group=grpSma)
+int smaStep = input.int(10, '길이 간격', minval=1, maxval=100, group=grpSma)
+int smaMinTrades = input.int(120, '최소 거래 수', minval=1, group=grpSma)
+bool showSmaTable = input.bool(true, 'SMA 통계 테이블', group=grpSma)
+
+int smaMaxLen = math.max(smaMaxLenInput, smaMinLen + smaStep)
+int smaCount = math.max(1, math.floor((smaMaxLen - smaMinLen) / smaStep) + 1)
+
+var int sma_cachedMin = na
+var int sma_cachedMax = na
+var int sma_cachedStep = na
+var int sma_cachedCount = na
+
+var int[] smaLens = array.new_int()
+var float[] smaEntry = array.new_float()
+var int[] smaDir = array.new_int()
+var int[] smaTrades = array.new_int()
+var int[] smaWins = array.new_int()
+var float[] smaProfitSum = array.new_float()
+var float[] smaLossSum = array.new_float()
+
+bool smaNeedReset = barstate.isfirst or sma_cachedMin != smaMinLen or sma_cachedMax != smaMaxLen or sma_cachedStep != smaStep
+if smaNeedReset
+    array.clear(smaLens)
+    array.clear(smaEntry)
+    array.clear(smaDir)
+    array.clear(smaTrades)
+    array.clear(smaWins)
+    array.clear(smaProfitSum)
+    array.clear(smaLossSum)
+    for idx = 0 to smaCount - 1
+        array.push(smaLens, smaMinLen + idx * smaStep)
+        array.push(smaEntry, na)
+        array.push(smaDir, 0)
+        array.push(smaTrades, 0)
+        array.push(smaWins, 0)
+        array.push(smaProfitSum, 0.0)
+        array.push(smaLossSum, 0.0)
+    sma_cachedMin := smaMinLen
+    sma_cachedMax := smaMaxLen
+    sma_cachedStep := smaStep
+    sma_cachedCount := smaCount
+
+float bestSmaScore = -1e10
+int bestSmaLen = array.size(smaLens) > 0 ? array.get(smaLens, 0) : smaMinLen
+int bestSmaTrades = 0
+float bestSmaPf = 0.0
+float bestSmaWr = 0.0
+float bestSmaSeries = na
+
+for i = 0 to array.size(smaLens) - 1
+    int len = array.get(smaLens, i)
+    float ma = ta.sma(close, len)
+    bool crossUp = ta.crossover(close, ma)
+    bool crossDown = ta.crossunder(close, ma)
+
+    int dir = array.get(smaDir, i)
+    float entryPrice = array.get(smaEntry, i)
+    int trades = array.get(smaTrades, i)
+    int wins = array.get(smaWins, i)
+    float profitSum = array.get(smaProfitSum, i)
+    float lossSum = array.get(smaLossSum, i)
+
+    if smaStrategyType == 'Buy & Sell'
+        if dir == 0
+            if crossUp
+                dir := 1
+                entryPrice := close
+                trades += 1
+            else if crossDown
+                dir := -1
+                entryPrice := close
+                trades += 1
+        else if dir == 1 and crossDown
+            float tradeProfit = close - entryPrice
+            if tradeProfit > 0
+                profitSum += tradeProfit
+                wins += 1
+            else
+                lossSum += -tradeProfit
+            dir := -1
+            entryPrice := close
+            trades += 1
+        else if dir == -1 and crossUp
+            float tradeProfit = entryPrice - close
+            if tradeProfit > 0
+                profitSum += tradeProfit
+                wins += 1
+            else
+                lossSum += -tradeProfit
+            dir := 1
+            entryPrice := close
+            trades += 1
+    else
+        if dir == 0 and crossUp
+            dir := 1
+            entryPrice := close
+            trades += 1
+        else if dir == 1 and crossDown
+            float tradeProfit = close - entryPrice
+            if tradeProfit > 0
+                profitSum += tradeProfit
+                wins += 1
+            else
+                lossSum += -tradeProfit
+            dir := 0
+            entryPrice := na
+
+    array.set(smaDir, i, dir)
+    array.set(smaEntry, i, entryPrice)
+    array.set(smaTrades, i, trades)
+    array.set(smaWins, i, wins)
+    array.set(smaProfitSum, i, profitSum)
+    array.set(smaLossSum, i, lossSum)
+
+    float profitFactor = lossSum > 0 ? profitSum / lossSum : profitSum > 0 ? 10000.0 : 0.0
+    float winRate = trades > 0 ? wins / trades : 0.0
+    float score = trades >= smaMinTrades and not na(profitFactor) and profitFactor >= 0 and not na(winRate) ? profitFactor * math.log(trades) * math.sqrt(winRate) : -1e10
+
+    if na(bestSmaSeries) or score > bestSmaScore
+        bestSmaScore := score
+        bestSmaLen := len
+        bestSmaTrades := trades
+        bestSmaPf := profitFactor
+        bestSmaWr := winRate
+        bestSmaSeries := ma
+
+float bestSma = na(bestSmaSeries) ? ta.sma(close, smaMinLen) : bestSmaSeries
+float bestSmaSlope = bestSma != 0 ? (bestSma - nz(bestSma[1], bestSma)) / bestSma * 100.0 : 0.0
+bool bestSmaTrendUp = bestSmaSlope >= 0
+bool bestSmaTrendDown = bestSmaSlope <= 0
+
+var table smaTable = na
+if showSmaTable and barstate.islast
+    if na(smaTable)
+        smaTable := table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 85), border_width=1)
+    table.cell(smaTable, 0, 0, 'Optimal SMA Length', text_color=color.white)
+    table.cell(smaTable, 1, 0, str.tostring(bestSmaLen), text_color=color.white)
+    table.cell(smaTable, 0, 1, 'Total Trades', text_color=color.white)
+    table.cell(smaTable, 1, 1, str.tostring(bestSmaTrades), text_color=color.white)
+    table.cell(smaTable, 0, 2, 'Profit Factor', text_color=color.white)
+    table.cell(smaTable, 1, 2, str.tostring(bestSmaPf, '#.##'), text_color=color.white)
+    table.cell(smaTable, 0, 3, 'Win Rate (%)', text_color=color.white)
+    table.cell(smaTable, 1, 3, str.tostring(bestSmaWr * 100, '#.#'), text_color=color.white)
+    table.cell(smaTable, 0, 4, 'Robustness', text_color=color.white)
+    table.cell(smaTable, 1, 4, str.tostring(bestSmaScore, '#.##'), text_color=color.white)
+
+// ╔═══════════════════════════════════════════════════════════════════════════════╗
+// ║ Section 5: Mixbabe + SMC 구조 로직                                            ║
+// ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+string grpSmc = 'J) SMC & 구조'
+int smcInternalLeft = input.int(2, '내부 스윙 좌', minval=1, maxval=5, group=grpSmc)
+int smcInternalRight = input.int(2, '내부 스윙 우', minval=1, maxval=5, group=grpSmc)
+int smcObLookback = input.int(12, 'Order Block 탐색 봉 수', minval=2, maxval=50, group=grpSmc)
+int smcFvgLookback = input.int(40, 'FVG 유효 봉 수', minval=5, maxval=150, group=grpSmc)
+int smcRangeLookback = input.int(120, '프리미엄/디스카운트 룩백', minval=20, maxval=400, group=grpSmc)
+float smcObTolerance = input.float(0.35, 'OB 재진입 허용 ATR 배수', minval=0.05, maxval=2.0, step=0.05, group=grpSmc)
+float smcFvgTolerance = input.float(0.25, 'FVG 재진입 허용 ATR 배수', minval=0.05, maxval=2.0, step=0.05, group=grpSmc)
+
+string grpSqz = 'K) 스퀴즈 모멘텀 & UT'
+int sqzLen = input.int(20, '모멘텀 길이', minval=5, maxval=100, group=grpSqz)
+int sqzSignal = input.int(5, '신호 EMA', minval=1, maxval=20, group=grpSqz)
+int sqzBbLen = input.int(20, '볼린저 길이', minval=5, maxval=100, group=grpSqz)
+float sqzBbMult = input.float(2.0, '볼린저 배수', minval=0.1, maxval=5.0, step=0.1, group=grpSqz)
+int sqzKcLen = input.int(20, '켈트너 길이', minval=5, maxval=100, group=grpSqz)
+float sqzKcMult = input.float(1.5, '켈트너 배수', minval=0.1, maxval=5.0, step=0.1, group=grpSqz)
+int sqzDynLen = input.int(34, '동적 임계값 길이', minval=5, maxval=200, group=grpSqz)
+float sqzDynMult = input.float(1.2, '동적 임계값 배수', minval=0.5, maxval=5.0, step=0.1, group=grpSqz)
+
+int utAtrLen = input.int(14, 'UT ATR 길이', minval=1, maxval=100, group=grpSqz)
+float utMult = input.float(1.5, 'UT ATR 배수', minval=0.1, maxval=10.0, step=0.1, group=grpSqz)
+string utSrcSel = input.string('CLOSE', 'UT 소스', options=['CLOSE', 'HL2', 'HLC3', 'OHLC4'], group=grpSqz)
+
+string grpRisk = 'L) ATR 손절/익절'
+int tradeAtrLen = input.int(14, 'ATR 길이', minval=5, maxval=100, group=grpRisk)
+float tradeSlMult = input.float(1.8, '손절 ATR 배수', minval=0.5, maxval=10.0, step=0.1, group=grpRisk)
+float tradeTpMult = input.float(2.6, '익절 ATR 배수', minval=0.5, maxval=10.0, step=0.1, group=grpRisk)
+bool useBreakeven = input.bool(true, '50% 진행 시 본전 이동', group=grpRisk)
+float breakevenMult = input.float(0.6, '본전 이동 ATR 배수', minval=0.1, maxval=3.0, step=0.05, group=grpRisk)
+
+float getSource(string mode) =>
+    switch mode
+        'HL2'   => hl2
+        'HLC3'  => hlc3
+        'OHLC4' => ohlc4
+        => close
+
+float sqzBasis = ta.sma(close, sqzBbLen)
+float sqzDev   = ta.stdev(close, sqzBbLen)
+float sqzBbUpper  = sqzBasis + sqzDev * sqzBbMult
+float sqzBbLower  = sqzBasis - sqzDev * sqzBbMult
+float sqzKcBasis  = ta.ema(close, sqzKcLen)
+float sqzKcRange  = ta.atr(sqzKcLen) * sqzKcMult
+float sqzKcUpper  = sqzKcBasis + sqzKcRange
+float sqzKcLower  = sqzKcBasis - sqzKcRange
+
+bool squeezeOn  = sqzBbUpper < sqzKcUpper and sqzBbLower > sqzKcLower
+bool squeezeOff = sqzBbUpper > sqzKcUpper and sqzBbLower < sqzKcLower
+bool squeezeFire = squeezeOn[1] and squeezeOff
+float momentumRaw = ta.linreg(close, sqzLen, 0) - ta.linreg(close, sqzLen, 1)
+float momentum = ta.ema(momentumRaw, sqzSignal)
+float dynThreshold = ta.stdev(momentumRaw, sqzDynLen) * sqzDynMult
+bool momentumBull = momentum > dynThreshold
+bool momentumBear = momentum < -dynThreshold
+
+float utSrc = getSource(utSrcSel)
+float utAtr = ta.atr(utAtrLen)
+float bullCalc = utSrc - utAtr * utMult
+float bearCalc = utSrc + utAtr * utMult
+var float utStop = na
+var bool utBull = true
+float prevStop = na(utStop[1]) ? bullCalc : utStop[1]
+bool prevBull = na(utBull[1]) ? true : utBull[1]
+bool nextBull = prevBull
+if close > prevStop and not prevBull
+    nextBull := true
+else if close < prevStop and prevBull
+    nextBull := false
+float nextStop = nextBull ? math.max(bullCalc, prevStop) : math.min(bearCalc, prevStop)
+utStop := nextStop
+utBull := nextBull
+
+float smcPivHigh = ta.pivothigh(high, smcInternalLeft, smcInternalRight)
+float smcPivLow  = ta.pivotlow(low, smcInternalLeft, smcInternalRight)
+var float smcSwingHigh = na
+var float smcSwingLow  = na
+var float smcPrevSwingHigh = na
+var float smcPrevSwingLow  = na
+if not na(smcPivHigh)
+    smcPrevSwingHigh := smcSwingHigh
+    smcSwingHigh := smcPivHigh
+if not na(smcPivLow)
+    smcPrevSwingLow := smcSwingLow
+    smcSwingLow := smcPivLow
+
+bool bullishBOS = not na(smcPrevSwingHigh) and close > smcPrevSwingHigh and close[1] <= smcPrevSwingHigh
+bool bearishBOS = not na(smcPrevSwingLow) and close < smcPrevSwingLow and close[1] >= smcPrevSwingLow
+var string smcBias = 'NEUTRAL'
+string smcPriorBias = nz(smcBias[1], 'NEUTRAL')
+if bullishBOS
+    smcBias := 'BULLISH'
+else if bearishBOS
+    smcBias := 'BEARISH'
+else
+    smcBias := smcPriorBias
+bool smcChoch = smcBias != smcPriorBias
+
+var float bullObHigh = na
+var float bullObLow  = na
+var int   bullObBar  = na
+var float bearObHigh = na
+var float bearObLow  = na
+var int   bearObBar  = na
+if bullishBOS
+    float tmpHigh = na
+    float tmpLow = na
+    for i = 1 to smcObLookback
+        if close[i] < open[i]
+            tmpHigh := high[i]
+            tmpLow  := low[i]
+            break
+    bullObHigh := tmpHigh
+    bullObLow  := tmpLow
+    bullObBar  := bar_index
+if bearishBOS
+    float tmpHighS = na
+    float tmpLowS = na
+    for i = 1 to smcObLookback
+        if close[i] > open[i]
+            tmpHighS := high[i]
+            tmpLowS  := low[i]
+            break
+    bearObHigh := tmpHighS
+    bearObLow  := tmpLowS
+    bearObBar  := bar_index
+
+var line bullObLineHigh = na
+var line bullObLineLow  = na
+if not na(bullObHigh) and not na(bullObLow)
+    if not na(bullObLineHigh)
+        line.delete(bullObLineHigh)
+    if not na(bullObLineLow)
+        line.delete(bullObLineLow)
+    bullObLineHigh := line.new(bullObBar, bullObHigh, bar_index, bullObHigh, extend=extend.right, color=color.new(color.lime, 60))
+    bullObLineLow  := line.new(bullObBar, bullObLow, bar_index, bullObLow, extend=extend.right, color=color.new(color.lime, 80))
+var line bearObLineHigh = na
+var line bearObLineLow  = na
+if not na(bearObHigh) and not na(bearObLow)
+    if not na(bearObLineHigh)
+        line.delete(bearObLineHigh)
+    if not na(bearObLineLow)
+        line.delete(bearObLineLow)
+    bearObLineHigh := line.new(bearObBar, bearObHigh, bar_index, bearObHigh, extend=extend.right, color=color.new(color.red, 80))
+    bearObLineLow  := line.new(bearObBar, bearObLow, bar_index, bearObLow, extend=extend.right, color=color.new(color.red, 60))
+
+bool inBullOb = not na(bullObHigh) and not na(bullObLow) and close <= bullObHigh and close >= bullObLow
+bool inBearOb = not na(bearObHigh) and not na(bearObLow) and close >= bearObLow and close <= bearObHigh
+
+var float bullFvgHigh = na
+var float bullFvgLow  = na
+var int   bullFvgBar  = na
+var float bearFvgHigh = na
+var float bearFvgLow  = na
+var int   bearFvgBar  = na
+bool bullFvg = bar_index > 2 and low[1] > high[2]
+bool bearFvg = bar_index > 2 and high[1] < low[2]
+if bullFvg
+    bullFvgHigh := low[1]
+    bullFvgLow  := high[2]
+    bullFvgBar  := bar_index
+if bearFvg
+    bearFvgHigh := low[2]
+    bearFvgLow  := high[1]
+    bearFvgBar  := bar_index
+
+var line bullFvgLineHigh = na
+var line bullFvgLineLow  = na
+if not na(bullFvgHigh) and not na(bullFvgLow)
+    if not na(bullFvgLineHigh)
+        line.delete(bullFvgLineHigh)
+    if not na(bullFvgLineLow)
+        line.delete(bullFvgLineLow)
+    bullFvgLineHigh := line.new(bullFvgBar, bullFvgHigh, bar_index, bullFvgHigh, extend=extend.right, color=color.new(color.aqua, 70))
+    bullFvgLineLow  := line.new(bullFvgBar, bullFvgLow, bar_index, bullFvgLow, extend=extend.right, color=color.new(color.aqua, 90))
+var line bearFvgLineHigh = na
+var line bearFvgLineLow  = na
+if not na(bearFvgHigh) and not na(bearFvgLow)
+    if not na(bearFvgLineHigh)
+        line.delete(bearFvgLineHigh)
+    if not na(bearFvgLineLow)
+        line.delete(bearFvgLineLow)
+    bearFvgLineHigh := line.new(bearFvgBar, bearFvgHigh, bar_index, bearFvgHigh, extend=extend.right, color=color.new(color.purple, 90))
+    bearFvgLineLow  := line.new(bearFvgBar, bearFvgLow, bar_index, bearFvgLow, extend=extend.right, color=color.new(color.purple, 70))
+
+bool bullFvgActive = not na(bullFvgHigh) and not na(bullFvgLow) and not na(bullFvgBar) and bar_index - bullFvgBar <= smcFvgLookback
+bool bearFvgActive = not na(bearFvgHigh) and not na(bearFvgLow) and not na(bearFvgBar) and bar_index - bearFvgBar <= smcFvgLookback
+bool inBullFvg = bullFvgActive and close <= bullFvgHigh and close >= bullFvgLow
+bool inBearFvg = bearFvgActive and close >= bearFvgLow and close <= bearFvgHigh
+
+float recentHigh = ta.highest(high, smcRangeLookback)
+float recentLow  = ta.lowest(low, smcRangeLookback)
+float equilibrium = (recentHigh + recentLow) / 2.0
+bool isDiscount = close <= equilibrium
+bool isPremium  = close >= equilibrium
+
+float tradeAtr = ta.atr(tradeAtrLen)
+bool atrReady = not na(tradeAtr) and tradeAtr > 0
+float bullObEntryZoneHigh = not na(bullObHigh) and atrReady ? bullObHigh + tradeAtr * smcObTolerance : na
+float bullObEntryZoneLow = not na(bullObLow) and atrReady ? bullObLow - tradeAtr * smcObTolerance : na
+float bearObEntryZoneHigh = not na(bearObHigh) and atrReady ? bearObHigh + tradeAtr * smcObTolerance : na
+float bearObEntryZoneLow = not na(bearObLow) and atrReady ? bearObLow - tradeAtr * smcObTolerance : na
+
+float bullFvgEntryHigh = bullFvgActive and atrReady ? bullFvgHigh + tradeAtr * smcFvgTolerance : na
+float bullFvgEntryLow = bullFvgActive and atrReady ? bullFvgLow - tradeAtr * smcFvgTolerance : na
+float bearFvgEntryHigh = bearFvgActive and atrReady ? bearFvgHigh + tradeAtr * smcFvgTolerance : na
+float bearFvgEntryLow = bearFvgActive and atrReady ? bearFvgLow - tradeAtr * smcFvgTolerance : na
+
+bool inBullZones = inBullOb or (bullFvgActive and not na(bullFvgEntryHigh) and not na(bullFvgEntryLow) and close <= bullFvgEntryHigh and close >= bullFvgEntryLow) or (not na(bullObEntryZoneHigh) and not na(bullObEntryZoneLow) and close <= bullObEntryZoneHigh and close >= bullObEntryZoneLow)
+bool inBearZones = inBearOb or (bearFvgActive and not na(bearFvgEntryHigh) and not na(bearFvgEntryLow) and close <= bearFvgEntryHigh and close >= bearFvgEntryLow) or (not na(bearObEntryZoneHigh) and not na(bearObEntryZoneLow) and close <= bearObEntryZoneHigh and close >= bearObEntryZoneLow)
+
+bool longSetupCore = smcBias == 'BULLISH' and utBull and momentumBull and bestSmaTrendUp
+bool shortSetupCore = smcBias == 'BEARISH' and not utBull and momentumBear and bestSmaTrendDown
+
+bool longContextOK = MODULE_contextLongOK and kasia_contextLongOK and kasia_distanceOK_L and kasia_isVolatilityOK
+bool shortContextOK = MODULE_contextShortOK and kasia_contextShortOK and kasia_distanceOK_S and kasia_isVolatilityOK
+
+bool longSetup = MODULE_canTrade and longContextOK and longSetupCore and atrReady and (inBullZones or (bullFvgActive and not na(bullFvgHigh) and close <= bullFvgHigh)) and isDiscount
+bool shortSetup = MODULE_canTrade and shortContextOK and shortSetupCore and atrReady and (inBearZones or (bearFvgActive and not na(bearFvgLow) and close >= bearFvgLow)) and isPremium
+
+var float longEntryAtr = na
+var float shortEntryAtr = na
+var float longStopPrice = na
+var float longTargetPrice = na
+var float shortStopPrice = na
+var float shortTargetPrice = na
+var float longBeTriggerPrice = na
+var float shortBeTriggerPrice = na
+var bool longBeArmed = false
+var bool shortBeArmed = false
+
+if longSetup and strategy.position_size <= 0
+    float atrBasis = tradeAtr
+    if atrBasis > 0
+        float stopDistForQty = atrBasis * tradeSlMult + MODULE_slipBuffer
+        float qty = kasia_calcPositionQty(stopDistForQty)
+        if qty > 0
+            longEntryAtr := atrBasis
+            longStopPrice := na
+            longTargetPrice := na
+            longBeTriggerPrice := na
+            longBeArmed := false
+            strategy.entry('Mix Long', strategy.long, qty=qty)
+
+if shortSetup and strategy.position_size >= 0
+    float atrBasisS = tradeAtr
+    if atrBasisS > 0
+        float stopDistForQtyS = atrBasisS * tradeSlMult + MODULE_slipBuffer
+        float qtyS = kasia_calcPositionQty(stopDistForQtyS)
+        if qtyS > 0
+            shortEntryAtr := atrBasisS
+            shortStopPrice := na
+            shortTargetPrice := na
+            shortBeTriggerPrice := na
+            shortBeArmed := false
+            strategy.entry('Mix Short', strategy.short, qty=qtyS)
+
+bool newLongPosition = strategy.position_size > 0 and nz(strategy.position_size[1]) <= 0
+if newLongPosition
+    float atrBasis = nz(longEntryAtr, tradeAtr)
+    float entryPrice = strategy.position_avg_price
+    if atrBasis > 0
+        longStopPrice := entryPrice - atrBasis * tradeSlMult
+        longTargetPrice := entryPrice + atrBasis * tradeTpMult
+        longBeTriggerPrice := useBreakeven ? entryPrice + atrBasis * breakevenMult : na
+    else
+        longStopPrice := na
+        longTargetPrice := na
+        longBeTriggerPrice := na
+    longBeArmed := false
+
+bool newShortPosition = strategy.position_size < 0 and nz(strategy.position_size[1]) >= 0
+if newShortPosition
+    float atrBasisS = nz(shortEntryAtr, tradeAtr)
+    float entryPriceS = strategy.position_avg_price
+    if atrBasisS > 0
+        shortStopPrice := entryPriceS + atrBasisS * tradeSlMult
+        shortTargetPrice := entryPriceS - atrBasisS * tradeTpMult
+        shortBeTriggerPrice := useBreakeven ? entryPriceS - atrBasisS * breakevenMult : na
+    else
+        shortStopPrice := na
+        shortTargetPrice := na
+        shortBeTriggerPrice := na
+    shortBeArmed := false
+
+if strategy.position_size > 0
+    if not longBeArmed and (not na(longStopPrice) or not na(longTargetPrice))
+        strategy.exit('Mix L Exit', 'Mix Long', stop=longStopPrice, limit=longTargetPrice)
+    if useBreakeven and not longBeArmed and not na(longBeTriggerPrice) and high >= longBeTriggerPrice
+        longBeArmed := true
+    if longBeArmed
+        if not na(longTargetPrice)
+            strategy.exit('Mix L Exit', 'Mix Long', limit=longTargetPrice)
+        strategy.exit('Mix L BE', 'Mix Long', stop=strategy.position_avg_price)
+
+bool longClosed = strategy.position_size <= 0 and nz(strategy.position_size[1]) > 0
+if longClosed
+    if longBeArmed
+        strategy.cancel('Mix L BE')
+    longBeArmed := false
+    longBeTriggerPrice := na
+    longEntryAtr := na
+    longStopPrice := na
+    longTargetPrice := na
+
+if strategy.position_size < 0
+    if not shortBeArmed and (not na(shortStopPrice) or not na(shortTargetPrice))
+        strategy.exit('Mix S Exit', 'Mix Short', stop=shortStopPrice, limit=shortTargetPrice)
+    if useBreakeven and not shortBeArmed and not na(shortBeTriggerPrice) and low <= shortBeTriggerPrice
+        shortBeArmed := true
+    if shortBeArmed
+        if not na(shortTargetPrice)
+            strategy.exit('Mix S Exit', 'Mix Short', limit=shortTargetPrice)
+        strategy.exit('Mix S BE', 'Mix Short', stop=strategy.position_avg_price)
+
+bool shortClosed = strategy.position_size >= 0 and nz(strategy.position_size[1]) < 0
+if shortClosed
+    if shortBeArmed
+        strategy.cancel('Mix S BE')
+    shortBeArmed := false
+    shortBeTriggerPrice := na
+    shortEntryAtr := na
+    shortStopPrice := na
+    shortTargetPrice := na
+
+plot(utStop, color=utBull ? color.new(color.lime, 0) : color.new(color.red, 0), linewidth=2, title='UT Trailing Stop')
+plot(momentum, color=momentum >= 0 ? color.new(color.lime, 0) : color.new(color.red, 0), title='Squeeze Momentum')
+plot(dynThreshold, color=color.new(color.gray, 70), title='+Dyn Threshold')
+plot(-dynThreshold, color=color.new(color.gray, 70), title='-Dyn Threshold')
+plot(bestSma, color=color.new(color.blue, 0), linewidth=2, title='Optimal SMA (Strategy)')
+plot(kasia_useMicroTrend ? kasia_emaFast : na, 'EMA 빠른선', color=color.new(color.aqua, 0))
+plot(kasia_useMicroTrend ? kasia_emaSlow : na, 'EMA 느린선', color=color.new(color.orange, 0))
+plot(kasia_usePivotSL ? kasia_pivLowCache : na, 'Pivot SL Long', color=color.new(color.red, 0), style=plot.style_linebr)
+plot(kasia_usePivotSL ? kasia_pivHighCache : na, 'Pivot SL Short', color=color.new(color.red, 0), style=plot.style_linebr)
+plot(kasia_useVWAPFilter ? kasia_vwap : na, 'VWAP', color=color.new(color.yellow, 40))
+
+plotshape(longSetup, location=location.belowbar, color=color.new(color.lime, 0), style=shape.triangleup, text='LONG', size=size.small, title='Long Setup')
+plotshape(shortSetup, location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, text='SHORT', size=size.small, title='Short Setup')
+
+hline(equilibrium, '균형가', color=color.new(color.yellow, 70))
+
+alertcondition(longSetup, title='Mixbabe Long', message='Mixbabe Apex Fusion: Long setup 감지')
+alertcondition(shortSetup, title='Mixbabe Short', message='Mixbabe Apex Fusion: Short setup 감지')
+// ╔═══════════════════════════════════════════════════════════════════════════════╗
+// ║ Section 6: HUD & 디버거 확장                                                  ║
+// ╚═══════════════════════════════════════════════════════════════════════════════╝
+
+if kasia_showHUD and barstate.islast
+    position hudPos = switch kasia_hudPosition
+        'Top Left' => position.top_left
+        'Top Right' => position.top_right
+        'Middle Left' => position.middle_left
+        'Middle Right' => position.middle_right
+        'Bottom Left' => position.bottom_left
+        => position.bottom_right
+
+    var table hud = table.new(hudPos, 2, 16, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
+
+    table.cell(hud, 0, 0, 'Mixbabe Apex HUD', text_color=color.white, bgcolor=color.new(color.purple, 20))
+    table.cell(hud, 1, 0, 'v' + MODULE_VERSION, text_color=color.white, bgcolor=color.new(color.purple, 20))
+
+    table.cell(hud, 0, 1, '거래 가능 자본', text_color=color.white)
+    table.cell(hud, 1, 1, f_str(kasia_tradableCapital), text_color=color.aqua)
+
+    table.cell(hud, 0, 2, '적립된 수익', text_color=color.white)
+    table.cell(hud, 1, 2, f_str(kasia_withdrawable), text_color=color.yellow)
+
+    float winrate = strategy.wintrades + strategy.losstrades == 0 ? 0 : strategy.wintrades / (strategy.wintrades + strategy.losstrades) * 100
+    color totalPnlColor = strategy.netprofit >= 0 ? color.lime : color.red
+    table.cell(hud, 0, 3, '승률 / 누적 PnL', text_color=color.white)
+    table.cell(hud, 1, 3, str.tostring(winrate, '##.##') + '% / ' + f_str(strategy.netprofit), text_color=totalPnlColor)
+
+    string dailyTargetTxt = kasia_useDailyProfitLock ? f_str(kasia_dailyProfitTarget) : 'OFF'
+    color dailyTargetColor = kasia_dailyProfitReached ? color.lime : kasia_dailyPnl >= 0 ? color.aqua : color.red
+    table.cell(hud, 0, 4, '일일 PnL / 목표', text_color=color.white)
+    table.cell(hud, 1, 4, f_str(kasia_dailyPnl) + ' / ' + dailyTargetTxt, text_color=dailyTargetColor, bgcolor=color.new(dailyTargetColor, kasia_dailyProfitReached ? 40 : 75))
+
+    string weeklyTargetTxt = kasia_useWeeklyProfitLock ? f_str(kasia_weeklyProfitTarget) : 'OFF'
+    color weeklyTargetColor = kasia_weeklyProfitReached ? color.lime : kasia_weeklyPnl >= 0 ? color.aqua : color.red
+    table.cell(hud, 0, 5, '주간 PnL / 목표', text_color=color.white)
+    table.cell(hud, 1, 5, f_str(kasia_weeklyPnl) + ' / ' + weeklyTargetTxt, text_color=weeklyTargetColor, bgcolor=color.new(weeklyTargetColor, kasia_weeklyProfitReached ? 40 : 75))
+
+    color atrStatusColor = kasia_isVolatilityOK ? color.new(color.aqua, 60) : color.new(color.red, 40)
+    table.cell(hud, 0, 6, 'ATR% 상태', text_color=color.white)
+    table.cell(hud, 1, 6, str.tostring(kasia_atrPct, '##.##') + '% / ' + str.tostring(kasia_volatilityLowerPct, '##.##') + '%-' + str.tostring(kasia_volatilityUpperPct, '##.##') + '%', text_color=kasia_isVolatilityOK ? color.aqua : color.red, bgcolor=atrStatusColor)
+
+    string haltText  = kasia_haltReasons ? '중지' : '가동'
+    color haltColor = kasia_haltReasons ? color.red : color.green
+    table.cell(hud, 0, 7, '거래 상태', text_color=color.white)
+    table.cell(hud, 1, 7, haltText, text_color=color.white, bgcolor=color.new(haltColor, 60))
+
+    string maxDailyTxt = kasia_maxDailyLosses > 0 ? str.tostring(kasia_maxDailyLosses) : '∞'
+    table.cell(hud, 0, 8, '일일 손실', text_color=color.white)
+    table.cell(hud, 1, 8, str.tostring(kasia_dailyLosses) + '/' + maxDailyTxt, text_color=kasia_stop_by_losses ? color.red : color.white)
+
+    table.cell(hud, 0, 9, '주간 DD', text_color=color.white)
+    table.cell(hud, 1, 9, str.tostring(kasia_weeklyDD, '##.##') + '% / ' + str.tostring(kasia_maxWeeklyDD, '##.##') + '%', text_color=kasia_stop_by_dd ? color.red : color.white)
+
+    string maxGuardTxt = kasia_maxGuardFires > 0 ? str.tostring(kasia_maxGuardFires) : '∞'
+    table.cell(hud, 0, 10, '청산 가드', text_color=color.white)
+    table.cell(hud, 1, 10, str.tostring(kasia_guardFiredTotal) + '/' + maxGuardTxt, text_color=kasia_stop_by_guard ? color.red : color.white)
+
+    table.cell(hud, 0, 11, '연패 상태', text_color=color.white)
+    table.cell(hud, 1, 11, str.tostring(kasia_lossStreak) + '/' + str.tostring(kasia_maxConsecutiveLosses), text_color=kasia_stop_by_streak ? color.red : color.white)
+
+    color parColor = not kasia_usePerfAdaptiveRisk ? color.gray : kasia_isHotStreak ? color.new(color.orange, 20) : kasia_isColdStreak ? color.new(color.blue, 20) : color.new(color.silver, 40)
+    table.cell(hud, 0, 12, 'PAR 상태', text_color=color.white)
+    table.cell(hud, 1, 12, kasia_parStateLabel + ' / ' + kasia_parWinLabel + ' / ' + str.tostring(kasia_finalRiskPct, '#.##') + '%', text_color=color.white, bgcolor=parColor)
+
+    table.cell(hud, 0, 13, 'SMC Bias', text_color=color.white)
+    table.cell(hud, 1, 13, smcBias + (smcChoch ? ' (CHoCH)' : ''), text_color=smcBias == 'BULLISH' ? color.lime : smcBias == 'BEARISH' ? color.red : color.silver)
+
+    table.cell(hud, 0, 14, 'UT / SMA 컨텍스트', text_color=color.white)
+    string utText = utBull ? 'UT Bull' : 'UT Bear'
+    string smaText = 'SMA ' + str.tostring(bestSmaLen) + ' / ' + (bestSmaTrendUp ? '상승' : bestSmaTrendDown ? '하락' : '중립')
+    table.cell(hud, 1, 14, utText + ' | ' + smaText, text_color=utBull ? color.lime : color.red)
+
+    table.cell(hud, 0, 15, 'Entry Flags', text_color=color.white)
+    string flagTxt = (longSetup ? 'L✔ ' : 'L✖ ') + (shortSetup ? 'S✔' : 'S✖')
+    table.cell(hud, 1, 15, flagTxt, text_color=color.white)
+
+f_cell(table tbl, int c, int r, string txt, bool ok) =>
+    color bg = ok ? color.new(color.green, 80) : color.new(color.red, 80)
+    table.cell(tbl, c, r, txt, bgcolor=bg, text_color=color.white)
+
+if kasia_showDebugger and barstate.islast
+    var table dbg = table.new(position.bottom_right, 3, 16, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
+    color headerDbgBg = color.new(color.blue, 40)
+    table.cell(dbg, 0, 0, '디버거', text_color=color.white, bgcolor=headerDbgBg)
+    table.cell(dbg, 1, 0, '', bgcolor=headerDbgBg)
+    table.cell(dbg, 2, 0, '', bgcolor=headerDbgBg)
+    table.merge_cells(dbg, 0, 0, 2, 0)
+
+    table.cell(dbg, 0, 1, '시간 필터', text_color=color.white)
+    f_cell(dbg, 1, 1, str.tostring(kasia_isTimeAllowed), kasia_isTimeAllowed)
+
+    table.cell(dbg, 0, 2, '레짐 L/S', text_color=color.white)
+    table.cell(dbg, 1, 2, str.tostring(kasia_htfLong) + '/' + str.tostring(kasia_htfShort), text_color=color.white)
+
+    table.cell(dbg, 0, 3, '마이크로 트렌드', text_color=color.white)
+    table.cell(dbg, 1, 3, str.tostring(kasia_microTrendLong) + '/' + str.tostring(kasia_microTrendShort), text_color=color.white)
+
+    table.cell(dbg, 0, 4, 'EMA 기울기', text_color=color.white)
+    table.cell(dbg, 1, 4, str.tostring(kasia_slopePct, '#.##') + '%', text_color=kasia_slopeOK_L ? color.aqua : color.red)
+
+    table.cell(dbg, 0, 5, 'VWAP', text_color=color.white)
+    f_cell(dbg, 1, 5, str.tostring(kasia_vwapLong), kasia_vwapLong)
+    table.cell(dbg, 2, 5, str.tostring(kasia_vwapShort), text_color=color.white)
+
+    table.cell(dbg, 0, 6, '모멘텀', text_color=color.white)
+    f_cell(dbg, 1, 6, str.tostring(kasia_momOK_L), kasia_momOK_L)
+    f_cell(dbg, 2, 6, str.tostring(kasia_momOK_S), kasia_momOK_S)
+
+    table.cell(dbg, 0, 7, 'CHoCH', text_color=color.white)
+    f_cell(dbg, 1, 7, str.tostring(kasia_chochOK_L), kasia_chochOK_L)
+    f_cell(dbg, 2, 7, str.tostring(kasia_chochOK_S), kasia_chochOK_S)
+
+    table.cell(dbg, 0, 8, '볼륨/캔들', text_color=color.white)
+    f_cell(dbg, 1, 8, str.tostring(kasia_volumeOK), kasia_volumeOK)
+    f_cell(dbg, 2, 8, str.tostring(kasia_candleOK), kasia_candleOK)
+
+    table.cell(dbg, 0, 9, '레인지/ATR', text_color=color.white)
+    f_cell(dbg, 1, 9, str.tostring(kasia_rangeOK), kasia_rangeOK)
+    f_cell(dbg, 2, 9, str.tostring(kasia_isVolatilityOK), kasia_isVolatilityOK)
+
+    table.cell(dbg, 0, 10, '거래 중지', text_color=color.white)
+    f_cell(dbg, 1, 10, str.tostring(kasia_haltReasons), not kasia_haltReasons)
+
+    table.cell(dbg, 0, 11, '가드 카운터', text_color=color.white)
+    table.cell(dbg, 1, 11, str.tostring(kasia_guardFiredTotal) + '/' + str.tostring(kasia_maxGuardFires), text_color=kasia_stop_by_guard ? color.red : color.white)
+
+    table.cell(dbg, 0, 12, 'DD & ATR%', text_color=color.white)
+    table.cell(dbg, 1, 12, str.tostring(kasia_weeklyDD, '##.##') + '% / ' + str.tostring(kasia_atrPct, '##.##') + '%', text_color=color.white)
+
+    table.cell(dbg, 0, 13, '컨텍스트 OK', text_color=color.white)
+    table.cell(dbg, 1, 13, str.tostring(kasia_contextLongOK) + '/' + str.tostring(kasia_contextShortOK), text_color=color.white)
+
+    table.cell(dbg, 0, 14, 'UT / SMA', text_color=color.white)
+    table.cell(dbg, 1, 14, utBull ? 'UT Bull' : 'UT Bear', text_color=utBull ? color.lime : color.red)
+    table.cell(dbg, 2, 14, 'SMA ' + str.tostring(bestSmaLen) + ' ' + (bestSmaTrendUp ? '↑' : bestSmaTrendDown ? '↓' : '→'), text_color=color.white)
+
+    table.cell(dbg, 0, 15, 'Setup Flags', text_color=color.white)
+    table.cell(dbg, 1, 15, longSetup ? 'LONG OK' : 'LONG OFF', text_color=longSetup ? color.lime : color.red)
+    table.cell(dbg, 2, 15, shortSetup ? 'SHORT OK' : 'SHORT OFF', text_color=shortSetup ? color.red : color.gray)
