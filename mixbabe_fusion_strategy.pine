@@ -472,6 +472,8 @@ MODULE_contextShortOK := kasia_contextShortOK
 MODULE_slipBuffer := kasia_slipBuffer
 MODULE_atrStop := kasia_atrStop
 
+f_str(val) => str.tostring(val, format.mintick)
+
 // ╔═══════════════════════════════════════════════════════════════════════════════╗
 // ║ Section 4: Best SMA Finder 통합                                               ║
 // ╚═══════════════════════════════════════════════════════════════════════════════╝
@@ -527,6 +529,7 @@ int bestSmaLen = array.size(smaLens) > 0 ? array.get(smaLens, 0) : smaMinLen
 int bestSmaTrades = 0
 float bestSmaPf = 0.0
 float bestSmaWr = 0.0
+float bestSmaSeries = na
 
 for i = 0 to array.size(smaLens) - 1
     int len = array.get(smaLens, i)
@@ -597,14 +600,15 @@ for i = 0 to array.size(smaLens) - 1
     float winRate = trades > 0 ? wins / trades : 0.0
     float score = trades >= smaMinTrades and not na(profitFactor) and profitFactor >= 0 and not na(winRate) ? profitFactor * math.log(trades) * math.sqrt(winRate) : -1e10
 
-    if score > bestSmaScore
+    if na(bestSmaSeries) or score > bestSmaScore
         bestSmaScore := score
         bestSmaLen := len
         bestSmaTrades := trades
         bestSmaPf := profitFactor
         bestSmaWr := winRate
+        bestSmaSeries := ma
 
-float bestSma = ta.sma(close, bestSmaLen)
+float bestSma = na(bestSmaSeries) ? ta.sma(close, smaMinLen) : bestSmaSeries
 float bestSmaSlope = bestSma != 0 ? (bestSma - nz(bestSma[1], bestSma)) / bestSma * 100.0 : 0.0
 bool bestSmaTrendUp = bestSmaSlope >= 0
 bool bestSmaTrendDown = bestSmaSlope <= 0
@@ -824,18 +828,19 @@ bool isDiscount = close <= equilibrium
 bool isPremium  = close >= equilibrium
 
 float tradeAtr = ta.atr(tradeAtrLen)
-float bullObEntryZoneHigh = bullObHigh + tradeAtr * smcObTolerance
-float bullObEntryZoneLow = bullObLow - tradeAtr * smcObTolerance
-float bearObEntryZoneHigh = bearObHigh + tradeAtr * smcObTolerance
-float bearObEntryZoneLow = bearObLow - tradeAtr * smcObTolerance
+bool atrReady = not na(tradeAtr) and tradeAtr > 0
+float bullObEntryZoneHigh = not na(bullObHigh) and atrReady ? bullObHigh + tradeAtr * smcObTolerance : na
+float bullObEntryZoneLow = not na(bullObLow) and atrReady ? bullObLow - tradeAtr * smcObTolerance : na
+float bearObEntryZoneHigh = not na(bearObHigh) and atrReady ? bearObHigh + tradeAtr * smcObTolerance : na
+float bearObEntryZoneLow = not na(bearObLow) and atrReady ? bearObLow - tradeAtr * smcObTolerance : na
 
-float bullFvgEntryHigh = bullFvgHigh + tradeAtr * smcFvgTolerance
-float bullFvgEntryLow = bullFvgLow - tradeAtr * smcFvgTolerance
-float bearFvgEntryHigh = bearFvgHigh + tradeAtr * smcFvgTolerance
-float bearFvgEntryLow = bearFvgLow - tradeAtr * smcFvgTolerance
+float bullFvgEntryHigh = bullFvgActive and atrReady ? bullFvgHigh + tradeAtr * smcFvgTolerance : na
+float bullFvgEntryLow = bullFvgActive and atrReady ? bullFvgLow - tradeAtr * smcFvgTolerance : na
+float bearFvgEntryHigh = bearFvgActive and atrReady ? bearFvgHigh + tradeAtr * smcFvgTolerance : na
+float bearFvgEntryLow = bearFvgActive and atrReady ? bearFvgLow - tradeAtr * smcFvgTolerance : na
 
-bool inBullZones = (inBullOb or (bullFvgActive and close <= bullFvgEntryHigh and close >= bullFvgEntryLow) or (bullObHigh and close <= bullObEntryZoneHigh and close >= bullObEntryZoneLow))
-bool inBearZones = (inBearOb or (bearFvgActive and close <= bearFvgEntryHigh and close >= bearFvgEntryLow) or (bearObHigh and close <= bearObEntryZoneHigh and close >= bearObEntryZoneLow))
+bool inBullZones = inBullOb or (bullFvgActive and not na(bullFvgEntryHigh) and not na(bullFvgEntryLow) and close <= bullFvgEntryHigh and close >= bullFvgEntryLow) or (not na(bullObEntryZoneHigh) and not na(bullObEntryZoneLow) and close <= bullObEntryZoneHigh and close >= bullObEntryZoneLow)
+bool inBearZones = inBearOb or (bearFvgActive and not na(bearFvgEntryHigh) and not na(bearFvgEntryLow) and close <= bearFvgEntryHigh and close >= bearFvgEntryLow) or (not na(bearObEntryZoneHigh) and not na(bearObEntryZoneLow) and close <= bearObEntryZoneHigh and close >= bearObEntryZoneLow)
 
 bool longSetupCore = smcBias == 'BULLISH' and utBull and momentumBull and bestSmaTrendUp
 bool shortSetupCore = smcBias == 'BEARISH' and not utBull and momentumBear and bestSmaTrendDown
@@ -843,36 +848,113 @@ bool shortSetupCore = smcBias == 'BEARISH' and not utBull and momentumBear and b
 bool longContextOK = MODULE_contextLongOK and kasia_contextLongOK and kasia_distanceOK_L and kasia_isVolatilityOK
 bool shortContextOK = MODULE_contextShortOK and kasia_contextShortOK and kasia_distanceOK_S and kasia_isVolatilityOK
 
-bool longSetup = MODULE_canTrade and longContextOK and longSetupCore and (inBullZones or (bullFvgActive and close <= bullFvgHigh)) and isDiscount
-bool shortSetup = MODULE_canTrade and shortContextOK and shortSetupCore and (inBearZones or (bearFvgActive and close >= bearFvgLow)) and isPremium
+bool longSetup = MODULE_canTrade and longContextOK and longSetupCore and atrReady and (inBullZones or (bullFvgActive and not na(bullFvgHigh) and close <= bullFvgHigh)) and isDiscount
+bool shortSetup = MODULE_canTrade and shortContextOK and shortSetupCore and atrReady and (inBearZones or (bearFvgActive and not na(bearFvgLow) and close >= bearFvgLow)) and isPremium
 
-float longStop = close - tradeAtr * tradeSlMult
-float longTarget = close + tradeAtr * tradeTpMult
-float shortStop = close + tradeAtr * tradeSlMult
-float shortTarget = close - tradeAtr * tradeTpMult
+var float longEntryAtr = na
+var float shortEntryAtr = na
+var float longStopPrice = na
+var float longTargetPrice = na
+var float shortStopPrice = na
+var float shortTargetPrice = na
+var float longBeTriggerPrice = na
+var float shortBeTriggerPrice = na
+var bool longBeArmed = false
+var bool shortBeArmed = false
 
-float longQtyStopDist = close - longStop + MODULE_slipBuffer
-float shortQtyStopDist = shortStop - close + MODULE_slipBuffer
-float longQty = longSetup ? kasia_calcPositionQty(longQtyStopDist) : 0.0
-float shortQty = shortSetup ? kasia_calcPositionQty(shortQtyStopDist) : 0.0
+if longSetup and strategy.position_size <= 0
+    float atrBasis = tradeAtr
+    if atrBasis > 0
+        float stopDistForQty = atrBasis * tradeSlMult + MODULE_slipBuffer
+        float qty = kasia_calcPositionQty(stopDistForQty)
+        if qty > 0
+            longEntryAtr := atrBasis
+            longStopPrice := na
+            longTargetPrice := na
+            longBeTriggerPrice := na
+            longBeArmed := false
+            strategy.entry('Mix Long', strategy.long, qty=qty)
 
-if longSetup and strategy.position_size <= 0 and longQty > 0
-    strategy.entry('Mix Long', strategy.long, qty=longQty)
-if shortSetup and strategy.position_size >= 0 and shortQty > 0
-    strategy.entry('Mix Short', strategy.short, qty=shortQty)
+if shortSetup and strategy.position_size >= 0
+    float atrBasisS = tradeAtr
+    if atrBasisS > 0
+        float stopDistForQtyS = atrBasisS * tradeSlMult + MODULE_slipBuffer
+        float qtyS = kasia_calcPositionQty(stopDistForQtyS)
+        if qtyS > 0
+            shortEntryAtr := atrBasisS
+            shortStopPrice := na
+            shortTargetPrice := na
+            shortBeTriggerPrice := na
+            shortBeArmed := false
+            strategy.entry('Mix Short', strategy.short, qty=qtyS)
+
+bool newLongPosition = strategy.position_size > 0 and nz(strategy.position_size[1]) <= 0
+if newLongPosition
+    float atrBasis = nz(longEntryAtr, tradeAtr)
+    float entryPrice = strategy.position_avg_price
+    if atrBasis > 0
+        longStopPrice := entryPrice - atrBasis * tradeSlMult
+        longTargetPrice := entryPrice + atrBasis * tradeTpMult
+        longBeTriggerPrice := useBreakeven ? entryPrice + atrBasis * breakevenMult : na
+    else
+        longStopPrice := na
+        longTargetPrice := na
+        longBeTriggerPrice := na
+    longBeArmed := false
+
+bool newShortPosition = strategy.position_size < 0 and nz(strategy.position_size[1]) >= 0
+if newShortPosition
+    float atrBasisS = nz(shortEntryAtr, tradeAtr)
+    float entryPriceS = strategy.position_avg_price
+    if atrBasisS > 0
+        shortStopPrice := entryPriceS + atrBasisS * tradeSlMult
+        shortTargetPrice := entryPriceS - atrBasisS * tradeTpMult
+        shortBeTriggerPrice := useBreakeven ? entryPriceS - atrBasisS * breakevenMult : na
+    else
+        shortStopPrice := na
+        shortTargetPrice := na
+        shortBeTriggerPrice := na
+    shortBeArmed := false
 
 if strategy.position_size > 0
-    strategy.exit('Mix L Exit', 'Mix Long', stop=longStop, limit=longTarget)
-    if useBreakeven and tradeAtr > 0
-        float beTrigger = strategy.position_avg_price + tradeAtr * breakevenMult
-        if high >= beTrigger
-            strategy.exit('Mix L BE', 'Mix Long', stop=strategy.position_avg_price)
+    if not longBeArmed and (not na(longStopPrice) or not na(longTargetPrice))
+        strategy.exit('Mix L Exit', 'Mix Long', stop=longStopPrice, limit=longTargetPrice)
+    if useBreakeven and not longBeArmed and not na(longBeTriggerPrice) and high >= longBeTriggerPrice
+        longBeArmed := true
+    if longBeArmed
+        if not na(longTargetPrice)
+            strategy.exit('Mix L Exit', 'Mix Long', limit=longTargetPrice)
+        strategy.exit('Mix L BE', 'Mix Long', stop=strategy.position_avg_price)
+
+bool longClosed = strategy.position_size <= 0 and nz(strategy.position_size[1]) > 0
+if longClosed
+    if longBeArmed
+        strategy.cancel('Mix L BE')
+    longBeArmed := false
+    longBeTriggerPrice := na
+    longEntryAtr := na
+    longStopPrice := na
+    longTargetPrice := na
+
 if strategy.position_size < 0
-    strategy.exit('Mix S Exit', 'Mix Short', stop=shortStop, limit=shortTarget)
-    if useBreakeven and tradeAtr > 0
-        float beTriggerS = strategy.position_avg_price - tradeAtr * breakevenMult
-        if low <= beTriggerS
-            strategy.exit('Mix S BE', 'Mix Short', stop=strategy.position_avg_price)
+    if not shortBeArmed and (not na(shortStopPrice) or not na(shortTargetPrice))
+        strategy.exit('Mix S Exit', 'Mix Short', stop=shortStopPrice, limit=shortTargetPrice)
+    if useBreakeven and not shortBeArmed and not na(shortBeTriggerPrice) and low <= shortBeTriggerPrice
+        shortBeArmed := true
+    if shortBeArmed
+        if not na(shortTargetPrice)
+            strategy.exit('Mix S Exit', 'Mix Short', limit=shortTargetPrice)
+        strategy.exit('Mix S BE', 'Mix Short', stop=strategy.position_avg_price)
+
+bool shortClosed = strategy.position_size >= 0 and nz(strategy.position_size[1]) < 0
+if shortClosed
+    if shortBeArmed
+        strategy.cancel('Mix S BE')
+    shortBeArmed := false
+    shortBeTriggerPrice := na
+    shortEntryAtr := na
+    shortStopPrice := na
+    shortTargetPrice := na
 
 plot(utStop, color=utBull ? color.new(color.lime, 0) : color.new(color.red, 0), linewidth=2, title='UT Trailing Stop')
 plot(momentum, color=momentum >= 0 ? color.new(color.lime, 0) : color.new(color.red, 0), title='Squeeze Momentum')
@@ -897,7 +979,7 @@ alertcondition(shortSetup, title='Mixbabe Short', message='Mixbabe Apex Fusion: 
 // ╚═══════════════════════════════════════════════════════════════════════════════╝
 
 if kasia_showHUD and barstate.islast
-    table.position posMap = switch kasia_hudPosition
+    position hudPos = switch kasia_hudPosition
         'Top Left' => position.top_left
         'Top Right' => position.top_right
         'Middle Left' => position.middle_left
@@ -905,8 +987,7 @@ if kasia_showHUD and barstate.islast
         'Bottom Left' => position.bottom_left
         => position.bottom_right
 
-    var table hud = table.new(posMap, 2, 16, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
-    f_str(val) => str.tostring(val, format.mintick)
+    var table hud = table.new(hudPos, 2, 16, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
 
     table.cell(hud, 0, 0, 'Mixbabe Apex HUD', text_color=color.white, bgcolor=color.new(color.purple, 20))
     table.cell(hud, 1, 0, 'v' + MODULE_VERSION, text_color=color.white, bgcolor=color.new(color.purple, 20))
