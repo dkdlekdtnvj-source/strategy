@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
+import inspect
 import json
 import logging
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from itertools import product
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from threading import Lock
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import optuna
@@ -20,10 +23,11 @@ import pandas as pd
 import yaml
 
 from datafeed.cache import DataCache
-from optimize.metrics import score_metrics
+from optimize.metrics import Trade, aggregate_metrics, score_metrics
 from optimize.report import generate_reports, write_bank_file, write_trials_dataframe
 from optimize.search_spaces import build_space, grid_choices, mutate_around, sample_parameters
-from optimize.strategy_model import run_backtest
+from optimize.strategy_model import DefaultStrategy
+from optimize.strategies.base import StrategyModel
 from optimize.wf import run_purged_kfold, run_walk_forward
 from optimize.regime import detect_regime_label, summarise_regime_performance
 from optimize.llm import generate_llm_candidates
@@ -35,6 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPORT_ROOT = Path("reports")
 STUDY_ROOT = Path("studies")
 NON_FINITE_PENALTY = -1e12
+HIGHLIGHT_METRICS = ["NetProfit", "ProfitFactor", "Sortino", "MaxDD", "Trades"]
 
 
 def _slugify_symbol(symbol: str) -> str:
@@ -75,6 +80,42 @@ def _configure_logging(log_dir: Path) -> None:
     handler = logging.FileHandler(log_path, mode="w", encoding="utf-8")
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     LOGGER.addHandler(handler)
+
+
+def _load_strategy(params_cfg: Dict[str, object]) -> StrategyModel:
+    strategy_cfg = params_cfg.get("strategy") if isinstance(params_cfg.get("strategy"), dict) else {}
+    module_name = str(strategy_cfg.get("module") or "optimize.strategy_model")
+    class_name = str(strategy_cfg.get("class") or "DefaultStrategy")
+    factory_name = strategy_cfg.get("factory")
+
+    try:
+        module = importlib.import_module(module_name)
+    except Exception as exc:
+        raise RuntimeError(f"전략 모듈을 불러오지 못했습니다: {module_name}") from exc
+
+    if factory_name:
+        factory = getattr(module, factory_name, None)
+        if factory is None or not callable(factory):
+            raise RuntimeError(f"전략 팩토리 {factory_name} 를 찾을 수 없습니다")
+        strategy = factory(params_cfg)
+    else:
+        strategy_obj = getattr(module, class_name, None)
+        if strategy_obj is None:
+            raise RuntimeError(f"전략 클래스 {class_name} 를 찾을 수 없습니다")
+        if inspect.isclass(strategy_obj) and issubclass(strategy_obj, StrategyModel):
+            if callable(getattr(strategy_obj, "from_config", None)):
+                strategy = strategy_obj.from_config(params_cfg)  # type: ignore[misc]
+            else:
+                strategy = strategy_obj()
+        else:
+            if callable(strategy_obj):
+                strategy = strategy_obj(params_cfg)
+            else:
+                raise RuntimeError(f"{class_name} 는 StrategyModel을 구현하지 않습니다")
+
+    if not isinstance(strategy, StrategyModel):
+        raise TypeError("전략 객체가 StrategyModel을 상속하지 않습니다")
+    return strategy
 
 
 def _build_run_tag(
@@ -572,38 +613,83 @@ def _nanmean(values: Iterable[float]) -> float:
     return float(np.nanmean(arr)) if arr else 0.0
 
 
+def _parse_objectives(objectives: Iterable[object]) -> List[Dict[str, object]]:
+    specs: List[Dict[str, object]] = []
+    for obj in objectives:
+        if isinstance(obj, str):
+            name = obj
+            weight = 1.0
+            direction = "minimize" if name.lower() in {"maxdd", "maxdrawdown"} else "maximize"
+        elif isinstance(obj, dict):
+            name = obj.get("name") or obj.get("metric")
+            if not name:
+                continue
+            weight = float(obj.get("weight", 1.0))
+            raw_direction = obj.get("direction") or obj.get("goal")
+            direction = str(raw_direction).lower() if raw_direction else None
+            if direction in {"min", "minimise", "minimize"}:
+                direction = "minimize"
+            elif direction in {"max", "maximise", "maximize"}:
+                direction = "maximize"
+            else:
+                direction = "minimize" if name.lower() in {"maxdd", "maxdrawdown"} else "maximize"
+        else:
+            continue
+        specs.append({"name": str(name), "weight": float(weight), "direction": direction})
+    return specs
+
+
 def combine_metrics(metric_list: List[Dict[str, float]]) -> Dict[str, float]:
     if not metric_list:
         return {}
 
-    total_trades = float(sum(m.get("Trades", 0) for m in metric_list))
-    total_wins = float(sum(m.get("Wins", 0) for m in metric_list))
-    total_losses = float(sum(m.get("Losses", 0) for m in metric_list))
-    gross_profit = float(sum(m.get("GrossProfit", 0.0) for m in metric_list))
-    gross_loss = float(sum(m.get("GrossLoss", 0.0) for m in metric_list))
+    weight_map: Dict[int, float] = {}
+    weighted_returns: Optional[pd.Series] = None
+    return_sources = [
+        (idx, metrics.get("Returns"))
+        for idx, metrics in enumerate(metric_list)
+        if isinstance(metrics.get("Returns"), pd.Series)
+    ]
 
-    combined: Dict[str, float] = {
-        "Trades": total_trades,
-        "Wins": total_wins,
-        "Losses": total_losses,
-        "GrossProfit": gross_profit,
-        "GrossLoss": gross_loss,
-        "NetProfit": _nanmean([m.get("NetProfit", 0.0) for m in metric_list]),
-        "TotalReturn": float(sum(m.get("NetProfit", 0.0) for m in metric_list)),
-        "MaxDD": min(m.get("MaxDD", 0.0) for m in metric_list),
-        "Sortino": _nanmean([m.get("Sortino", 0.0) for m in metric_list]),
-        "Sharpe": _nanmean([m.get("Sharpe", 0.0) for m in metric_list]),
-        "AvgRR": _nanmean([m.get("AvgRR", 0.0) for m in metric_list]),
-        "AvgHoldBars": _nanmean([m.get("AvgHoldBars", 0.0) for m in metric_list]),
-        "AvgMFE": _nanmean([m.get("AvgMFE", 0.0) for m in metric_list]),
-        "AvgMAE": _nanmean([m.get("AvgMAE", 0.0) for m in metric_list]),
-        "WeeklyNetProfit": _nanmean([m.get("WeeklyNetProfit", 0.0) for m in metric_list]),
-        "WeeklyReturnStd": _nanmean([m.get("WeeklyReturnStd", 0.0) for m in metric_list]),
-        "ProfitFactor": (gross_profit / abs(gross_loss)) if gross_loss else float("inf"),
-        "WinRate": (total_wins / total_trades) if total_trades else 0.0,
-        "MaxConsecutiveLosses": max(m.get("MaxConsecutiveLosses", 0.0) for m in metric_list),
-        "Expectancy": _nanmean([m.get("Expectancy", 0.0) for m in metric_list]),
-    }
+    if return_sources:
+        weight = 1.0 / len(return_sources)
+        for idx, series in return_sources:
+            assert isinstance(series, pd.Series)
+            weight_map[idx] = weight
+            weighted_component = series.fillna(0.0) * weight
+            weighted_returns = (
+                weighted_component
+                if weighted_returns is None
+                else weighted_returns.add(weighted_component, fill_value=0.0)
+            )
+    else:
+        fallback_weight = 1.0 / len(metric_list)
+        for idx in range(len(metric_list)):
+            weight_map[idx] = fallback_weight
+
+    if weighted_returns is None:
+        weighted_returns = pd.Series(dtype=float)
+
+    trades_pool: List[Trade] = []
+    for idx, metrics in enumerate(metric_list):
+        trades = metrics.get("TradesList")
+        weight = weight_map.get(idx, 0.0)
+        if trades:
+            for trade in trades:
+                scaled = replace(
+                    trade,
+                    size=trade.size * weight,
+                    profit=trade.profit * weight,
+                    return_pct=trade.return_pct * weight,
+                    mfe=trade.mfe * weight,
+                    mae=trade.mae * weight,
+                )
+                trades_pool.append(scaled)
+
+    aggregated = aggregate_metrics(trades_pool, weighted_returns)
+    aggregated["Returns"] = weighted_returns
+    aggregated["TradesList"] = trades_pool
+    aggregated["Valid"] = all(m.get("Valid", True) for m in metric_list)
 
     base = metric_list[0]
     for key in [
@@ -615,10 +701,12 @@ def combine_metrics(metric_list: List[Dict[str, float]]) -> Dict[str, float]:
         "ConsecutiveLossPenalty",
     ]:
         if key in base:
-            combined[key] = float(base[key])
+            aggregated[key] = float(base[key])
 
-    combined["Valid"] = all(m.get("Valid", True) for m in metric_list)
-    return combined
+    aggregated["Trades"] = int(aggregated.get("Trades", 0))
+    aggregated["Wins"] = int(aggregated.get("Wins", 0))
+    aggregated["Losses"] = int(aggregated.get("Losses", 0))
+    return aggregated
 
 
 def _clean_metrics(metrics: Dict[str, object]) -> Dict[str, object]:
@@ -656,6 +744,7 @@ def optimisation_loop(
     objectives: Iterable[object],
     fees: Dict[str, float],
     risk: Dict[str, float],
+    strategy: StrategyModel,
     forced_params: Optional[Dict[str, object]] = None,
     *,
     study_storage: Optional[Path] = None,
@@ -664,6 +753,25 @@ def optimisation_loop(
     log_dir: Optional[Path] = None,
 ) -> Dict[str, object]:
     search_cfg = params_cfg.get("search", {})
+    objectives = list(objectives)
+    objective_specs = _parse_objectives(objectives)
+    multi_objective_flag = search_cfg.get("multi_objective")
+    if isinstance(multi_objective_flag, bool):
+        multi_objective = multi_objective_flag
+    else:
+        mode = str(search_cfg.get("objective_mode", "single")).lower()
+        multi_objective = mode in {"multi", "pareto"}
+    multi_objective = bool(multi_objective and objective_specs)
+
+    validation_cfg = params_cfg.get("validation", {}) if isinstance(params_cfg.get("validation"), dict) else {}
+    inline_cfg = validation_cfg.get("in_objective", {}) if isinstance(validation_cfg.get("in_objective"), dict) else {}
+    inline_enabled = bool(inline_cfg.get("enabled"))
+    inline_frequency = max(int(inline_cfg.get("frequency", 1)), 1)
+    inline_weight = float(inline_cfg.get("weight", 0.0))
+    inline_train = int(inline_cfg.get("train_bars", 0))
+    inline_test = int(inline_cfg.get("test_bars", 0))
+    inline_step = int(inline_cfg.get("step", inline_test or 1))
+
     space = build_space(params_cfg.get("space", {}))
 
     dataset_groups, timeframe_groups, default_key = _group_datasets(datasets)
@@ -685,6 +793,18 @@ def optimisation_loop(
             if candidate.exists():
                 candidate.unlink()
     non_finite_penalty = float(search_cfg.get("non_finite_penalty", NON_FINITE_PENALTY))
+    cpu_count = os.cpu_count() or 1
+    raw_n_jobs = search_cfg.get("n_jobs", "auto")
+    if isinstance(raw_n_jobs, str) and raw_n_jobs.lower() == "auto":
+        n_jobs = cpu_count
+    else:
+        try:
+            n_jobs = int(raw_n_jobs)
+        except Exception:
+            n_jobs = cpu_count
+    if n_jobs <= 0:
+        n_jobs = cpu_count
+
     llm_cfg = params_cfg.get("llm", {}) if isinstance(params_cfg.get("llm"), dict) else {}
 
     if algo == "grid":
@@ -695,6 +815,9 @@ def optimisation_loop(
         sampler = optuna.samplers.CmaEsSampler(seed=seed, consider_pruned_trials=True)
     else:
         sampler = optuna.samplers.TPESampler(seed=seed, multivariate=True, group=True)
+
+    if n_jobs > 1 and isinstance(sampler, optuna.samplers.CmaEsSampler):
+        LOGGER.warning("CMA-ES 샘플러는 병렬 실행과 궁합이 좋지 않을 수 있습니다 (n_jobs=%s)", n_jobs)
 
     pruner_cfg = str(search_cfg.get("pruner", "asha"))
     pruner_params = search_cfg.get("pruner_params", {})
@@ -720,14 +843,25 @@ def optimisation_loop(
         )
     storage_arg = storage if storage is not None else storage_url
 
-    study = optuna.create_study(
-        direction="maximize",
-        sampler=sampler,
-        pruner=pruner,
-        study_name=study_name,
-        storage=storage_arg,
-        load_if_exists=bool(storage_arg),
-    )
+    if multi_objective:
+        directions = [spec["direction"] for spec in objective_specs] or ["maximize"]
+        study = optuna.create_study(
+            directions=directions,
+            sampler=sampler,
+            pruner=pruner,
+            study_name=study_name,
+            storage=storage_arg,
+            load_if_exists=bool(storage_arg),
+        )
+    else:
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=sampler,
+            pruner=pruner,
+            study_name=study_name,
+            storage=storage_arg,
+            load_if_exists=bool(storage_arg),
+        )
     if space_hash:
         study.set_user_attr("space_hash", space_hash)
 
@@ -740,6 +874,10 @@ def optimisation_loop(
             continue
 
     results: List[Dict[str, object]] = []
+    results_lock = Lock()
+    log_lock = Lock()
+    best_state = {"score": float("-inf"), "trial": None, "params": None}
+    best_state_lock = Lock()
 
     def _to_native(value: object) -> object:
         if isinstance(value, np.generic):
@@ -749,50 +887,63 @@ def optimisation_loop(
     def _log_trial(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         if trial_log_path is None:
             return
-        trial_value: Optional[float]
-        if trial.value is None:
-            trial_value = None
-        else:
-            try:
-                trial_value = float(trial.value)
-            except Exception:
-                trial_value = None
+
+        values: List[float] = []
+        if trial.values is not None:
+            for val in trial.values:
+                try:
+                    values.append(float(val))
+                except Exception:
+                    continue
+
         record = {
             "number": trial.number,
-            "value": trial_value,
+            "values": values if len(values) > 1 else (values[0] if values else None),
             "state": str(trial.state),
             "params": {key: _to_native(val) for key, val in trial.params.items()},
             "datetime_complete": str(trial.datetime_complete) if trial.datetime_complete else None,
         }
-        with trial_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        if best_yaml_path is None:
-            return
-        try:
-            best_trial = study.best_trial
-        except ValueError:
-            return
-        if best_trial.number != trial.number:
-            return
-        best_value = None
-        if best_trial.value is not None:
-            try:
-                best_value = float(best_trial.value)
-            except Exception:
-                best_value = None
-        snapshot = {
-            "best_value": best_value,
-            "best_params": {key: _to_native(val) for key, val in best_trial.params.items()},
+        highlights = {
+            key: trial.user_attrs[key]
+            for key in HIGHLIGHT_METRICS
+            if key in trial.user_attrs
         }
-        with best_yaml_path.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(snapshot, handle, allow_unicode=True, sort_keys=False)
+        if highlights:
+            record["metrics"] = highlights
+
+        with log_lock:
+            with trial_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     callbacks: List = []
     if trial_log_path is not None:
         callbacks.append(_log_trial)
 
-    def objective(trial: optuna.Trial) -> float:
+    def _update_best_snapshot(record: Dict[str, object], score_value: float) -> None:
+        if not np.isfinite(score_value):
+            return
+        with best_state_lock:
+            if score_value <= best_state["score"]:
+                return
+            best_state["score"] = score_value
+            best_state["trial"] = record.get("trial")
+            best_state["params"] = record.get("params")
+            if best_yaml_path is None:
+                return
+            params_payload = {
+                key: _to_native(val)
+                for key, val in (record.get("params") or {}).items()
+            }
+            snapshot = {
+                "best_value": float(score_value),
+                "best_params": params_payload,
+                "trial": record.get("trial"),
+            }
+            with best_yaml_path.open("w", encoding="utf-8") as handle:
+                yaml.safe_dump(snapshot, handle, allow_unicode=True, sort_keys=False)
+
+    def objective(trial: optuna.Trial) -> Union[float, Tuple[float, ...]]:
         params = sample_parameters(trial, space)
         params.update(forced_params)
         key, selected_datasets = _select_datasets_for_params(
@@ -816,8 +967,20 @@ def optimisation_loop(
                 return non_finite_penalty
             return numeric
 
+        primary_prepared: Optional[Tuple[pd.DataFrame, Optional[pd.DataFrame]]] = None
+
         for idx, dataset in enumerate(selected_datasets, start=1):
-            metrics = run_backtest(dataset.df, params, fees, risk, htf_df=dataset.htf)
+            prepared_df, prepared_htf = strategy.prepare_data(dataset.df, dataset.htf, params)
+            if primary_prepared is None:
+                primary_prepared = (prepared_df, prepared_htf)
+            metrics = strategy.run_backtest(
+                prepared_df,
+                params,
+                fees,
+                risk,
+                htf_df=prepared_htf,
+                min_trades=risk.get("min_trades"),
+            )
             numeric_metrics.append(metrics)
             dataset_metrics.append(
                 {
@@ -832,23 +995,62 @@ def optimisation_loop(
             partial_score = _sanitise(partial_score, f"partial@{idx}")
             trial.report(partial_score, step=idx)
             if trial.should_prune():
-                results.append(
-                    {
-                        "trial": trial.number,
-                        "params": params,
-                        "metrics": _clean_metrics(partial_metrics),
-                        "datasets": dataset_metrics,
-                        "score": partial_score,
-                        "valid": partial_metrics.get("Valid", True),
-                        "dataset_key": {"timeframe": key[0], "htf_timeframe": key[1]},
-                        "pruned": True,
-                    }
-                )
+                with results_lock:
+                    results.append(
+                        {
+                            "trial": trial.number,
+                            "params": params,
+                            "metrics": _clean_metrics(partial_metrics),
+                            "datasets": dataset_metrics,
+                            "score": partial_score,
+                            "valid": partial_metrics.get("Valid", True),
+                            "dataset_key": {"timeframe": key[0], "htf_timeframe": key[1]},
+                            "pruned": True,
+                        }
+                    )
                 raise optuna.TrialPruned()
 
         aggregated = combine_metrics(numeric_metrics)
         score = score_metrics(aggregated, objectives)
+
+        inline_summary: Optional[Dict[str, object]] = None
+        if (
+            inline_enabled
+            and selected_datasets
+            and inline_train > 0
+            and inline_test > 0
+            and trial.number % inline_frequency == 0
+        ):
+            base_dataset = selected_datasets[0]
+            if primary_prepared is None:
+                primary_prepared = strategy.prepare_data(base_dataset.df, base_dataset.htf, params)
+            prepared_df, prepared_htf = primary_prepared
+            inline_summary = run_walk_forward(
+                prepared_df,
+                params,
+                fees,
+                risk,
+                train_bars=inline_train,
+                test_bars=inline_test,
+                step=inline_step,
+                htf_df=prepared_htf,
+                strategy=strategy,
+            )
+            oos_mean = float(inline_summary.get("oos_mean", 0.0))
+            aggregated["WF_OOS"] = oos_mean
+            if inline_weight:
+                score = (1 - inline_weight) * score + inline_weight * oos_mean
+
         score = _sanitise(score, "final")
+
+        for metric_name in HIGHLIGHT_METRICS:
+            value = aggregated.get(metric_name)
+            if value is None:
+                continue
+            try:
+                trial.set_user_attr(metric_name, float(value))
+            except Exception:
+                continue
 
         record = {
             "trial": trial.number,
@@ -860,7 +1062,47 @@ def optimisation_loop(
             "dataset_key": {"timeframe": key[0], "htf_timeframe": key[1]},
             "pruned": False,
         }
-        results.append(record)
+        if inline_summary is not None:
+            record["inline_validation"] = inline_summary
+
+        if multi_objective:
+            objective_values: List[float] = []
+            for spec in objective_specs:
+                value = aggregated.get(spec["name"])
+                if value is None or not np.isfinite(float(value)):
+                    objective_values.append(non_finite_penalty)
+                else:
+                    objective_values.append(float(value))
+            record["optuna_values"] = objective_values
+            with results_lock:
+                results.append(record)
+            _update_best_snapshot(record, score)
+            LOGGER.info(
+                "Trial %s 완료 score=%.4f PF=%.3f Sortino=%.3f DD=%.3f Trades=%s",
+                trial.number,
+                score,
+                aggregated.get("ProfitFactor"),
+                aggregated.get("Sortino"),
+                aggregated.get("MaxDD"),
+                aggregated.get("Trades"),
+            )
+            return tuple(objective_values)
+
+        with results_lock:
+            results.append(record)
+
+        _update_best_snapshot(record, score)
+
+        LOGGER.info(
+            "Trial %s 완료 score=%.4f PF=%.3f Sortino=%.3f DD=%.3f Trades=%s",
+            trial.number,
+            score,
+            aggregated.get("ProfitFactor"),
+            aggregated.get("Sortino"),
+            aggregated.get("MaxDD"),
+            aggregated.get("Trades"),
+        )
+
         return score
 
     def _run_optuna(batch: int) -> None:
@@ -872,6 +1114,7 @@ def optimisation_loop(
             show_progress_bar=False,
             callbacks=callbacks,
             gc_after_trial=True,
+            n_jobs=n_jobs,
         )
 
     use_llm = bool(llm_cfg.get("enabled"))
@@ -906,8 +1149,18 @@ def optimisation_loop(
     if not results:
         raise RuntimeError("No completed trials were produced during optimisation.")
 
-    best_trial = study.best_trial.number
-    best_record = next(res for res in results if res["trial"] == best_trial)
+    best_record: Optional[Dict[str, object]] = None
+    if best_state["trial"] is not None:
+        best_trial_num = int(best_state["trial"])
+        best_record = next((res for res in results if res["trial"] == best_trial_num), None)
+    if best_record is None:
+        try:
+            best_trial_num = study.best_trial.number
+            best_record = next((res for res in results if res["trial"] == best_trial_num), None)
+        except ValueError:
+            best_record = None
+    if best_record is None:
+        best_record = max(results, key=lambda r: r.get("score", float("-inf")))
     return {"study": study, "results": results, "best": best_record}
 
 
@@ -1078,6 +1331,18 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
     fees = merge_dicts(params_cfg.get("fees", {}), backtest_cfg.get("fees", {}))
     risk = merge_dicts(params_cfg.get("risk", {}), backtest_cfg.get("risk", {}))
 
+    try:
+        strategy_instance = _load_strategy(params_cfg)
+    except Exception as exc:
+        LOGGER.error("전략 로딩에 실패하여 기본 전략으로 대체합니다: %s", exc)
+        strategy_instance = DefaultStrategy()
+    else:
+        LOGGER.info(
+            "전략 모듈 %s.%s 를 사용합니다",
+            strategy_instance.__class__.__module__,
+            strategy_instance.__class__.__name__,
+        )
+
     objectives_cfg = params_cfg.get("objectives", [])
     if isinstance(objectives_cfg, list):
         objectives: List[str] = list(objectives_cfg)
@@ -1112,6 +1377,7 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         objectives,
         fees,
         risk,
+        strategy_instance,
         forced_params,
         study_storage=study_storage,
         space_hash=space_hash,
@@ -1155,6 +1421,7 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         test_bars=int(walk_cfg.get("test_bars", 2000)),
         step=int(walk_cfg.get("step", 2000)),
         htf_df=primary_dataset.htf,
+        strategy=strategy_instance,
     )
 
     cv_summary = None
@@ -1171,6 +1438,7 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
             k=cv_k,
             embargo=cv_embargo,
             htf_df=primary_dataset.htf,
+            strategy=strategy_instance,
         )
         wf_summary["purged_kfold"] = cv_summary
         cv_manifest = {"type": "purged-kfold", "k": cv_k, "embargo": cv_embargo}
@@ -1207,6 +1475,7 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
                 test_bars=int(walk_cfg.get("test_bars", 2000)),
                 step=int(walk_cfg.get("step", 2000)),
                 htf_df=candidate_dataset.htf,
+                strategy=strategy_instance,
             )
             wf_cache[record["trial"]] = candidate_wf
             candidate_summaries.append(
@@ -1277,6 +1546,13 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         "risk": risk,
         "objectives": list(objectives),
         "search": params_cfg.get("search", {}),
+        "strategy": {
+            "config": params_cfg.get("strategy", {}),
+            "resolved": {
+                "module": strategy_instance.__class__.__module__,
+                "class": strategy_instance.__class__.__name__,
+            },
+        },
         "resume_bank": str(resume_bank_path) if resume_bank_path else None,
         "study_storage": str(study_storage) if study_storage else None,
         "regime": regime_summary.__dict__,
@@ -1304,6 +1580,7 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         wf_summary,
         objectives,
         output_dir,
+        study=optimisation.get("study"),
     )
 
     LOGGER.info("Run complete. Outputs saved to %s", output_dir)

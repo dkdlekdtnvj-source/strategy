@@ -145,7 +145,20 @@ pytest
 - Metrics include Net Profit, Max Drawdown, Sortino, Sharpe, Profit Factor, Win Rate,
   weekly net profit, expectancy, RR, average MFE/MAE, and average holding period. The
   optimiser combines weighted objectives with penalties for breaching the risk gates and
-  can optionally re-score the top trials by walk-forward OOS mean.
+  can optionally re-score the top trials by walk-forward OOS mean. 각 목표 지표는
+  `direction`(maximize/minimize)을 명시할 수 있으며, `search.multi_objective=true`
+  설정 시 Optuna 파레토 탐색으로 전환됩니다.
+- `strategy` 블록에서 사용할 파이썬 전략 클래스를 모듈/클래스로 지정할 수 있어
+  동일한 최적화 파이프라인으로 다양한 전략을 플러그인 형태로 교체할 수 있습니다.
+- `search.n_jobs` 를 `auto` 로 두면 시스템 CPU 코어 수에 맞춰 병렬 최적화가 동작하며,
+  다중 스레드 환경에서도 로그/결과 기록이 안전하게 직렬화됩니다.
+- `combine_metrics` 는 이제 각 데이터셋의 수익률 시리즈와 트레이드 리스트를 사용해
+  실제 포트폴리오 기준으로 성과·위험 지표(ProfitFactor, MaxDD 등)를 재계산합니다.
+- 최적화 중 `trials.jsonl` 에는 NetProfit/ProfitFactor/Sortino/MaxDD/Trades 등 핵심 지표가
+  함께 기록되며, 리포트 생성 시 Optuna 파라미터 중요도 JSON과 시각화가 추가됩니다.
+- `validation.in_objective` 옵션을 사용하면 지정한 주기로 경량 Walk-forward 점수를
+  산출해 본 점수와 가중 평균하거나, 로그에 별도 기록하여 과최적화를 조기 감지할 수
+  있습니다.
 - Optimisation state is stored in `studies/<symbol>_<ltf>_<htf>.db` (SQLite + heartbeat)
   so 중단 후 재실행 시 자동으로 이어달리기(warm start)가 됩니다. JSONL/YAML 로그는
   최적화 도중 예기치 못한 종료가 발생해도 남도록 `trials/` 폴더에 즉시 기록됩니다.
