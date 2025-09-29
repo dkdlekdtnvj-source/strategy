@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import logging
@@ -48,6 +49,12 @@ NON_FINITE_PENALTY = -1e12
 def _slugify_symbol(symbol: str) -> str:
     text = symbol.split(":")[-1]
     return text.replace("/", "").replace(" ", "")
+
+
+def _slugify_timeframe(timeframe: Optional[str]) -> str:
+    if not timeframe:
+        return "nohtf"
+    return str(timeframe).replace("/", "_").replace(" ", "")
 
 
 def _space_hash(space: Dict[str, object]) -> str:
@@ -151,6 +158,46 @@ def _load_json(path: Path) -> Dict[str, object]:
         return {}
 
 
+def _parse_timeframe_grid(raw: Optional[str]) -> List[Tuple[str, Optional[str]]]:
+    if not raw:
+        return []
+    combos: List[Tuple[str, Optional[str]]] = []
+    text = str(raw).replace("\n", ",").replace(";", ",")
+    for token in text.split(","):
+        candidate = token.strip()
+        if not candidate:
+            continue
+        if "@" in candidate:
+            ltf, htf = candidate.split("@", 1)
+        elif ":" in candidate:
+            ltf, htf = candidate.split(":", 1)
+        else:
+            ltf, htf = candidate, None
+        ltf = ltf.strip()
+        htf = htf.strip() if htf is not None else None
+        if not ltf:
+            continue
+        combos.append((ltf, htf or None))
+    return combos
+
+
+def _format_batch_value(
+    template: Optional[str],
+    base: Optional[str],
+    suffix: str,
+    context: Dict[str, object],
+) -> Optional[str]:
+    if template:
+        try:
+            return template.format(**context)
+        except KeyError as exc:
+            missing = exc.args[0]
+            raise ValueError(f"Unknown placeholder '{missing}' in template {template!r}") from exc
+    if base:
+        return f"{base}_{suffix}" if suffix else base
+    return suffix or None
+
+
 def _resolve_study_storage(
     params_cfg: Dict[str, object],
     datasets: Sequence["DatasetSpec"],
@@ -162,6 +209,33 @@ def _resolve_study_storage(
     )
     htf_slug = str(htf or "nohtf").replace("/", "_")
     return STUDY_ROOT / f"{symbol_slug}_{timeframe_slug}_{htf_slug}.db"
+
+
+def _extract_primary_htf(
+    params_cfg: Dict[str, object],
+    datasets: Sequence["DatasetSpec"],
+) -> Optional[str]:
+    raw = params_cfg.get("htf_timeframes")
+    if isinstance(raw, (list, tuple)) and len(raw) == 1:
+        return str(raw[0])
+    direct = params_cfg.get("htf_timeframe") or params_cfg.get("htf")
+    if direct:
+        return str(direct)
+    if datasets and getattr(datasets[0], "htf_timeframe", None):
+        return str(datasets[0].htf_timeframe)
+    return None
+
+
+def _default_study_name(
+    params_cfg: Dict[str, object],
+    datasets: Sequence["DatasetSpec"],
+    space_hash: Optional[str] = None,
+) -> str:
+    _, symbol_slug, timeframe_slug, _ = _build_run_tag(datasets, params_cfg, None)
+    htf = _extract_primary_htf(params_cfg, datasets)
+    htf_slug = _slugify_timeframe(htf)
+    suffix = f"_{space_hash[:6]}" if space_hash else ""
+    return f"{symbol_slug}_{timeframe_slug}_{htf_slug}{suffix}"
 
 
 def _discover_bank_path(
@@ -682,7 +756,8 @@ def optimisation_loop(
 
     dataset_groups, timeframe_groups, default_key = _group_datasets(datasets)
 
-    algo = search_cfg.get("algo", "bayes")
+    algo_raw = search_cfg.get("algo", "bayes")
+    algo = str(algo_raw or "bayes").lower()
     seed = search_cfg.get("seed")
     n_trials = int(search_cfg.get("n_trials", 50))
     forced_params = forced_params or {}
@@ -701,12 +776,50 @@ def optimisation_loop(
     non_finite_penalty = float(search_cfg.get("non_finite_penalty", NON_FINITE_PENALTY))
     llm_cfg = params_cfg.get("llm", {}) if isinstance(params_cfg.get("llm"), dict) else {}
 
+    nsga_params_cfg = search_cfg.get("nsga_params") or {}
+    nsga_kwargs: Dict[str, object] = {}
+    population_override = nsga_params_cfg.get("population_size") or search_cfg.get("nsga_population")
+    if population_override is not None:
+        try:
+            nsga_kwargs["population_size"] = int(population_override)
+        except (TypeError, ValueError):
+            LOGGER.warning("Invalid nsga population size '%s'; using Optuna default", population_override)
+    elif multi_objective:
+        space_size = len(space) if hasattr(space, "__len__") else 0
+        nsga_kwargs["population_size"] = max(64, (space_size or 0) * 2 or 64)
+    if nsga_params_cfg.get("mutation_prob") is not None:
+        try:
+            nsga_kwargs["mutation_prob"] = float(nsga_params_cfg["mutation_prob"])
+        except (TypeError, ValueError):
+            LOGGER.warning("Invalid nsga mutation_prob '%s'; ignoring", nsga_params_cfg["mutation_prob"])
+    if nsga_params_cfg.get("crossover_prob") is not None:
+        try:
+            nsga_kwargs["crossover_prob"] = float(nsga_params_cfg["crossover_prob"])
+        except (TypeError, ValueError):
+            LOGGER.warning("Invalid nsga crossover_prob '%s'; ignoring", nsga_params_cfg["crossover_prob"])
+    if nsga_params_cfg.get("swap_step") is not None:
+        try:
+            nsga_kwargs["swap_step"] = int(nsga_params_cfg["swap_step"])
+        except (TypeError, ValueError):
+            LOGGER.warning("Invalid nsga swap_step '%s'; ignoring", nsga_params_cfg["swap_step"])
+    if seed is not None:
+        try:
+            nsga_kwargs["seed"] = int(seed)
+        except (TypeError, ValueError):
+            LOGGER.warning("Invalid seed '%s'; ignoring for NSGA-II", seed)
+
+    use_nsga = algo in {"nsga", "nsga2", "nsgaii"}
+    if multi_objective and not use_nsga and algo in {"bayes", "tpe", "default", "auto"}:
+        use_nsga = True
+
     if algo == "grid":
         sampler = optuna.samplers.GridSampler(grid_choices(space))
     elif algo == "random":
         sampler = optuna.samplers.RandomSampler(seed=seed)
     elif algo in {"cmaes", "cma-es", "cma"}:
         sampler = optuna.samplers.CmaEsSampler(seed=seed, consider_pruned_trials=True)
+    elif use_nsga:
+        sampler = optuna.samplers.NSGAIISampler(**nsga_kwargs)
     else:
         sampler = optuna.samplers.TPESampler(seed=seed, multivariate=True, group=True)
 
@@ -714,8 +827,16 @@ def optimisation_loop(
     pruner_params = search_cfg.get("pruner_params", {})
     pruner = _create_pruner(pruner_cfg, pruner_params or {})
 
+    storage_cfg = search_cfg.get("storage_url")
+    storage_env_key = search_cfg.get("storage_url_env")
+    storage_env_value = os.getenv(str(storage_env_key)) if storage_env_key else None
+
     storage_url = None
-    if study_storage is not None:
+    if storage_env_value:
+        storage_url = str(storage_env_value)
+    elif storage_cfg:
+        storage_url = str(storage_cfg)
+    elif study_storage is not None:
         study_storage.parent.mkdir(parents=True, exist_ok=True)
         storage_url = f"sqlite:///{study_storage}"
 
@@ -723,15 +844,31 @@ def optimisation_loop(
 
     storage: Optional[optuna.storages.RDBStorage]
     storage = None
+    storage_meta = {
+        "backend": None,
+        "url": None,
+        "path": None,
+        "env_key": storage_env_key,
+        "env_value_present": bool(storage_env_value),
+    }
     if storage_url:
         heartbeat_interval = max(int(search_cfg.get("heartbeat_interval", 60)), 0)
         heartbeat_grace = max(int(search_cfg.get("heartbeat_grace_period", 120)), 0)
+        engine_kwargs = {}
+        if storage_url.startswith("sqlite:///"):
+            engine_kwargs["connect_args"] = {"check_same_thread": False}
         storage = optuna.storages.RDBStorage(
             url=storage_url,
-            engine_kwargs={"connect_args": {"check_same_thread": False}},
+            engine_kwargs=engine_kwargs or None,
             heartbeat_interval=heartbeat_interval or None,
             grace_period=heartbeat_grace or None,
         )
+        storage_meta["backend"] = "sqlite" if storage_url.startswith("sqlite:///") else "rdb"
+        if storage_url.startswith("sqlite:///"):
+            storage_meta["url"] = storage_url
+            storage_meta["path"] = str(study_storage) if study_storage else storage_url[10:]
+    else:
+        storage_meta["backend"] = "none"
     storage_arg = storage if storage is not None else storage_url
 
     study_kwargs = dict(
@@ -961,7 +1098,13 @@ def optimisation_loop(
         if not np.isfinite(_profit_factor_key(best_record)):
             best_trial = study.best_trial.number
             best_record = next(res for res in results if res["trial"] == best_trial)
-    return {"study": study, "results": results, "best": best_record, "multi_objective": multi_objective}
+    return {
+        "study": study,
+        "results": results,
+        "best": best_record,
+        "multi_objective": multi_objective,
+        "storage": storage_meta,
+    }
 
 
 def merge_dicts(primary: Dict[str, float], secondary: Dict[str, float]) -> Dict[str, float]:
@@ -981,6 +1124,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--symbol", type=str, help="Override symbol to optimise")
     parser.add_argument("--timeframe", type=str, help="Override lower timeframe")
     parser.add_argument("--htf", type=str, help="Override higher timeframe for confirmations")
+    parser.add_argument(
+        "--timeframe-grid",
+        type=str,
+        help="Comma/semicolon separated LTF@HTF 조합을 일괄 실행 (예: '1m@15m,1m@1h')",
+    )
     parser.add_argument("--start", type=str, help="Override backtest start date (ISO8601)")
     parser.add_argument("--end", type=str, help="Override backtest end date (ISO8601)")
     parser.add_argument("--leverage", type=float, help="Override leverage setting")
@@ -990,7 +1138,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable", action="append", default=[], help="Force-disable boolean parameters (comma separated)")
     parser.add_argument("--top-k", type=int, default=0, help="Re-rank top-K trials by walk-forward OOS mean")
     parser.add_argument("--n-trials", type=int, help="Override Optuna trial count")
+    parser.add_argument("--study-name", type=str, help="Override Optuna study name")
+    parser.add_argument(
+        "--study-template",
+        type=str,
+        help="--timeframe-grid 사용 시 스터디 이름 템플릿 (예: '{symbol_slug}_{ltf_slug}_{htf_slug}')",
+    )
+    parser.add_argument("--storage-url", type=str, help="Override Optuna storage URL (sqlite:/// or RDB)")
+    parser.add_argument(
+        "--storage-url-env",
+        type=str,
+        help="Optuna 스토리지 URL을 읽어올 환경 변수 이름을 덮어씁니다",
+    )
     parser.add_argument("--run-tag", type=str, help="Additional suffix for the output directory name")
+    parser.add_argument(
+        "--run-tag-template",
+        type=str,
+        help="--timeframe-grid 실행 시 출력 디렉터리 태그 템플릿",
+    )
     parser.add_argument("--resume-from", type=Path, help="Path to a bank.json file for warm-start seeding")
     parser.add_argument("--pruner", type=str, help="Override pruner selection (asha, hyperband, median, threshold, patient, wilcoxon, none)")
     parser.add_argument("--cv", type=str, choices=["purged-kfold", "none"], help="Enable auxiliary cross-validation scoring")
@@ -1005,15 +1170,58 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return build_parser().parse_args(argv)
 
 
-def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> None:
-    """Execute an optimisation run using an :class:`argparse.Namespace`."""
+def _execute_single(
+    args: argparse.Namespace,
+    params_cfg: Dict[str, object],
+    backtest_cfg: Dict[str, object],
+    argv: Optional[Sequence[str]] = None,
+) -> None:
+    params_cfg = copy.deepcopy(params_cfg)
+    backtest_cfg = copy.deepcopy(backtest_cfg)
+    params_cfg.setdefault("space", {})
+    backtest_cfg.setdefault("symbols", backtest_cfg.get("symbols", []))
+    backtest_cfg.setdefault("timeframes", backtest_cfg.get("timeframes", []))
+    backtest_cfg.setdefault("htf_timeframes", backtest_cfg.get("htf_timeframes", []))
 
-    params_cfg = load_yaml(args.params)
-    backtest_cfg = load_yaml(args.backtest)
+    batch_ctx = getattr(args, "_batch_context", None)
+    if batch_ctx:
+        suffix = batch_ctx.get("suffix") or (
+            f"{batch_ctx.get('ltf_slug', '')}_{batch_ctx.get('htf_slug', '')}".strip("_")
+        )
+        try:
+            args.run_tag = _format_batch_value(
+                batch_ctx.get("run_tag_template"),
+                batch_ctx.get("base_run_tag"),
+                suffix,
+                batch_ctx,
+            )
+            base_study = batch_ctx.get("base_study_name")
+            study_template = batch_ctx.get("study_template")
+            if base_study or study_template:
+                args.study_name = _format_batch_value(
+                    study_template,
+                    base_study,
+                    suffix,
+                    batch_ctx,
+                )
+        except ValueError as exc:
+            raise ValueError(f"배치 템플릿 해석에 실패했습니다: {exc}") from exc
 
     if args.n_trials is not None:
         search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["n_trials"] = int(args.n_trials)
+
+    if args.study_name:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        search_cfg["study_name"] = args.study_name
+
+    if args.storage_url:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        search_cfg["storage_url"] = args.storage_url
+
+    if args.storage_url_env:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        search_cfg["storage_url_env"] = args.storage_url_env
 
     if args.pruner:
         search_cfg = _ensure_dict(params_cfg, "search")
@@ -1140,6 +1348,9 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         objectives_config = []
     objective_specs = normalise_objectives(objectives_config)
     space_hash = _space_hash(params_cfg.get("space", {}))
+    search_cfg = _ensure_dict(params_cfg, "search")
+    if not search_cfg.get("study_name"):
+        search_cfg["study_name"] = _default_study_name(params_cfg, datasets, space_hash)
     primary_for_regime = _pick_primary_dataset(datasets)
     regime_summary = detect_regime_label(primary_for_regime.df)
 
@@ -1335,6 +1546,13 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
     if cv_summary:
         validation_manifest["summary"] = cv_summary
 
+    storage_meta = optimisation.get("storage", {}) or {}
+    search_manifest = copy.deepcopy(params_cfg.get("search", {}))
+    if "storage_url" in search_manifest:
+        url_value = search_manifest.get("storage_url")
+        if url_value and not str(url_value).startswith("sqlite:///"):
+            search_manifest["storage_url"] = "***redacted***"
+
     manifest = {
         "created_at": datetime.utcnow().isoformat() + "Z",
         "run": tag_info,
@@ -1343,12 +1561,14 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         "fees": fees,
         "risk": risk,
         "objectives": [spec.__dict__ for spec in objective_specs],
-        "search": params_cfg.get("search", {}),
+        "search": search_manifest,
         "resume_bank": str(resume_bank_path) if resume_bank_path else None,
-        "study_storage": str(study_storage) if study_storage else None,
+        "study_storage": storage_meta.get("path") if storage_meta.get("backend") == "sqlite" else None,
         "regime": regime_summary.__dict__,
         "cli": list(argv or []),
     }
+    if storage_meta:
+        manifest["storage"] = storage_meta
     if validation_manifest:
         manifest["validation"] = validation_manifest
 
@@ -1374,6 +1594,73 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
     )
 
     LOGGER.info("Run complete. Outputs saved to %s", output_dir)
+
+
+def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> None:
+    """Execute one or more optimisation runs based on CLI arguments."""
+
+    params_cfg = load_yaml(args.params)
+    backtest_cfg = load_yaml(args.backtest)
+
+    combos = _parse_timeframe_grid(getattr(args, "timeframe_grid", None))
+    if not combos:
+        _execute_single(args, params_cfg, backtest_cfg, argv)
+        return
+
+    base_symbol: Optional[str]
+    if args.symbol:
+        base_symbol = args.symbol
+    else:
+        base_symbol = params_cfg.get("symbol") if params_cfg else None
+        if not base_symbol:
+            symbols = backtest_cfg.get("symbols") if isinstance(backtest_cfg, dict) else None
+            if isinstance(symbols, list) and symbols:
+                first = symbols[0]
+                if isinstance(first, dict):
+                    base_symbol = (
+                        first.get("alias")
+                        or first.get("name")
+                        or first.get("symbol")
+                        or first.get("id")
+                    )
+                else:
+                    base_symbol = str(first)
+
+    symbol_text = str(base_symbol) if base_symbol else "study"
+    symbol_slug = _slugify_symbol(symbol_text)
+    total = len(combos)
+    combo_summary = ", ".join(f"{ltf}/{htf or '-'}" for ltf, htf in combos)
+    LOGGER.info("타임프레임 그리드 %d건 실행: %s", total, combo_summary)
+
+    for index, (ltf, htf) in enumerate(combos, start=1):
+        batch_args = argparse.Namespace(**vars(args))
+        batch_args.timeframe = ltf
+        batch_args.htf = htf
+        suffix = f"{_slugify_timeframe(ltf)}_{_slugify_timeframe(htf)}".strip("_")
+        context = {
+            "index": index,
+            "total": total,
+            "ltf": ltf,
+            "htf": htf,
+            "ltf_slug": _slugify_timeframe(ltf),
+            "htf_slug": _slugify_timeframe(htf),
+            "symbol": symbol_text,
+            "symbol_slug": symbol_slug,
+            "suffix": suffix,
+            "base_run_tag": getattr(args, "run_tag", None),
+            "base_study_name": getattr(args, "study_name", None),
+            "run_tag_template": getattr(args, "run_tag_template", None),
+            "study_template": getattr(args, "study_template", None),
+        }
+        batch_args._batch_context = context  # type: ignore[attr-defined]
+        LOGGER.info(
+            "(%d/%d) LTF=%s, HTF=%s 조합 최적화 시작",
+            index,
+            total,
+            ltf,
+            htf or "없음",
+        )
+        _execute_single(batch_args, params_cfg, backtest_cfg, argv)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

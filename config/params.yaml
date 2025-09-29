@@ -28,14 +28,21 @@ objectives:
     weight: 0.75
   - name: MaxDD
     weight: 0.5
+    goal: minimize
 search:
   algo: bayes
   n_trials: 150
   seed: 42
+  study_name: "pine_squeeze_default"
+  storage_url_env: "OPTUNA_STORAGE_URL"
   top_k: 5
   pruner: asha
   heartbeat_interval: 60
   heartbeat_grace_period: 120
+  multi_objective: true
+  nsga_params:
+    population_size: 120
+    crossover_prob: 0.9
 walk_forward:
   train_bars: 0
   test_bars: 0
@@ -43,7 +50,7 @@ walk_forward:
 llm:
   enabled: true
   model: "gemini-2.0-flash-exp"
-  api_key: "AIzaSyDD1i5TbCqfWEMFunoxtvnpnr0VW3XZtsY"
+  api_key: "${YOUR_GEMINI_API_KEY}"
   api_key_env: "GEMINI_API_KEY"
   top_n: 12
   count: 8

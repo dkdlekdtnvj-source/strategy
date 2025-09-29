@@ -42,7 +42,7 @@ pip install -r requirements.txt
    breakeven, time stop). You can also pre-define `overrides` to pin any parameter
    on/off before a run and enable Top-K walk-forward re-ranking via `search.top_k`.
 3. Configure the sweep universe in `config/backtest.yaml`. By default it contains
-  nine Binance USDT perpetual pairs (ENA, ETH, BTC, SOL, **XPL**, **ASTER**, DOGE,
+  nine Binance USDT perpetual pairs (ENA, ETH, BTC, SOL, **XPLA**, **ASTER**, DOGE,
   XRP, SUI) with lower timeframes 1m/3m/5m, higher timeframes 15m/1h, and a single
   2024-01-01 → 2025-09-25 창. The optimiser now treats the LTF/HTF selections as
   categorical parameters, so each Optuna trial chooses one combination while the
@@ -68,11 +68,13 @@ pip install -r requirements.txt
    available:
 
    - `--symbol`, `--timeframe`, `--htf`, `--start`, `--end`
+   - `--timeframe-grid 1m@15m,3m@1h` 으로 여러 LTF/HTF 조합을 일괄 실행 (필요 시 `--study-template`, `--run-tag-template` 으로 이름 규칙 지정)
    - `--leverage`, `--qty-pct`
    - `--n-trials`
    - `--enable name1,name2`, `--disable name3`
    - `--top-k 10` to re-rank the best Optuna trials by walk-forward out-of-sample
      performance.
+   - `--storage-url-env OPTUNA_STORAGE_URL` 로 YAML 설정 없이도 Optuna 스토리지 환경 변수를 바꿔 외부 RDB를 가리킬 수 있습니다.
 
   Outputs are written to `reports/` (`results.csv`, `results_datasets.csv`,
   `results_timeframe_summary.csv`, `results_timeframe_rankings.csv`, `best.json`,
@@ -110,8 +112,8 @@ Optuna 트라이얼을 먼저 수행한 뒤 Gemini API에 "탑 트라이얼 요�
 평가합니다.
 
 - API 키는 `GEMINI_API_KEY` 환경변수 또는 `llm.api_key` 항목에서 읽습니다. 샘플
-  프로필에는 요청하신 무료 키가 기본값으로 포함돼 있지만, 운영 환경에서는 환경
-  변수 사용을 권장합니다.
+  프로필에는 `${YOUR_GEMINI_API_KEY}` 플레이스홀더가 포함돼 있으며, 운영 환경에서는
+  환경 변수 사용을 권장합니다.
 - 기본 모델은 `gemini-2.0-flash-exp` 이며 `top_n`/`count` 값으로 참고할 트라이얼
   수와 제안 받을 후보 수를 제어할 수 있습니다.
 - `google-genai` 패키지가 설치돼 있지 않으면 경고만 출력하고 LLM 단계를 건너뜁니다.
@@ -126,6 +128,15 @@ python -m optimize.run --params config/params.yaml --backtest config/backtest.ya
 실행 후 `reports/<timestamp>.../trials/trials.jsonl` 에서는 각 트라이얼의 상태, 점수,
 파라미터를 줄 단위 JSON 으로 확인할 수 있고 `trials_final.csv` 는 Excel/BI 도구에서
 바로 열 수 있도록 준비됩니다.
+
+## 병렬/대규모 최적화
+
+- `config/params.yaml` 의 `search.study_name` 으로 스터디 이름을 고정하면 여러 프로세스가 같은 스터디를 공유할 수 있습니다. 이름을 지정하지 않으면 자동으로 `심볼_LTF_HTF_해시` 형태가 생성돼 배치 실행 시 충돌을 방지합니다.
+- `search.storage_url_env`(기본값 `OPTUNA_STORAGE_URL`), CLI `--storage-url-env`, `--storage-url` 로 RDB 접속 정보를 지정하면 Optuna가 프로세스/노드 병렬을 지원합니다. 환경 변수가 없으면 자동으로 `studies/` 아래 SQLite 파일을 사용합니다.
+- CLI `--study-name`/`--storage-url` 플래그는 YAML 설정을 일시적으로 덮어쓰는 용도로 사용할 수 있습니다.
+- `--timeframe-grid` 를 사용하면 여러 타임프레임 조합을 한 번에 실행하면서 각 조합마다 독립된 리포트/스터디가 생성되며, 필요 시 `--study-template`, `--run-tag-template` 로 이름 규칙을 조정할 수 있습니다.
+- 기본 프로필은 다목표(`NetProfit`, `Sortino`, `ProfitFactor`, `MaxDD`) 최적화를 활성화하고 Optuna NSGA-II 샘플러(population 120, crossover 0.9)를 자동 선택합니다. 파라미터는 `search.nsga_params` 로 세부 조정 가능합니다.
+- 타임프레임 조합별 1,000회 실행, Dask/Ray 연동 방법 등 자세한 절차는 [`docs/optuna_parallel.md`](docs/optuna_parallel.md) 를 참고하세요.
 
 ## Testing
 
