@@ -2,9 +2,11 @@ import pandas as pd
 import pytest
 
 from optimize.metrics import (
+    ObjectiveSpec,
     Trade,
     aggregate_metrics,
     equity_curve_from_returns,
+    evaluate_objective_values,
     max_drawdown,
     normalise_objectives,
     score_metrics,
@@ -185,6 +187,21 @@ def test_score_metrics_minimize_goal():
     metrics = {"AvgHoldBars": 10.0}
     score = score_metrics(metrics, [{"name": "AvgHoldBars", "goal": "minimize"}])
     assert score == pytest.approx(-10.0)
+
+
+def test_evaluate_objective_values_handles_penalties_and_weights():
+    specs = [
+        ObjectiveSpec(name="NetProfit", goal="maximize", weight=1.0),
+        ObjectiveSpec(name="MaxDD", goal="minimize", weight=2.0),
+        ObjectiveSpec(name="Sortino", goal="maximize", weight=0.0),
+    ]
+    metrics = {"NetProfit": float("nan"), "MaxDD": float("nan"), "Sortino": float("nan")}
+
+    values = evaluate_objective_values(metrics, specs, non_finite_penalty=-1e6)
+
+    assert values[0] < 0  # maximize 항목은 큰 음수 패널티로 처리되어야 함
+    assert values[1] > 0  # 최소화 항목은 큰 양수 패널티를 받아야 함
+    assert values[2] == 0  # weight가 0이면 패널티도 0이어야 함
 
 
 def test_combine_metrics_respects_series_length():

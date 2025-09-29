@@ -21,7 +21,14 @@ import pandas as pd
 import yaml
 
 from datafeed.cache import DataCache
-from optimize.metrics import ObjectiveSpec, Trade, aggregate_metrics, normalise_objectives, score_metrics
+from optimize.metrics import (
+    ObjectiveSpec,
+    Trade,
+    aggregate_metrics,
+    evaluate_objective_values,
+    normalise_objectives,
+    score_metrics,
+)
 from optimize.report import generate_reports, write_bank_file, write_trials_dataframe
 from optimize.search_spaces import build_space, grid_choices, mutate_around, sample_parameters
 from optimize.strategy_model import run_backtest
@@ -816,29 +823,6 @@ def optimisation_loop(
             return non_finite_penalty
         return numeric
 
-    def _evaluate_multi_objective(metrics: Dict[str, float]) -> Tuple[float, ...]:
-        values: List[float] = []
-        for spec in objective_specs:
-            raw = metrics.get(spec.name)
-            try:
-                numeric = float(raw)
-            except Exception:
-                numeric = float("nan")
-            name_lower = spec.name.lower()
-            if name_lower in {"maxdd", "maxdrawdown"}:
-                numeric = abs(numeric) if spec.is_minimize else -abs(numeric)
-            if not np.isfinite(numeric):
-                penalty = abs(non_finite_penalty)
-                weight = abs(float(spec.weight))
-                if weight == 0:
-                    numeric = 0.0
-                else:
-                    numeric = (penalty if spec.is_minimize else -penalty) * weight
-            else:
-                numeric *= float(spec.weight)
-            values.append(numeric)
-        return tuple(values)
-
         for idx, dataset in enumerate(selected_datasets, start=1):
             metrics = run_backtest(dataset.df, params, fees, risk, htf_df=dataset.htf)
             numeric_metrics.append(metrics)
@@ -854,7 +838,9 @@ def optimisation_loop(
             partial_score = score_metrics(partial_metrics, objective_specs)
             partial_score = _sanitise(partial_score, f"partial@{idx}")
             partial_objectives: Optional[Tuple[float, ...]] = (
-                _evaluate_multi_objective(partial_metrics) if multi_objective else None
+                evaluate_objective_values(partial_metrics, objective_specs, non_finite_penalty)
+                if multi_objective
+                else None
             )
             trial.report(partial_score, step=idx)
             if trial.should_prune():
@@ -877,7 +863,9 @@ def optimisation_loop(
         score = score_metrics(aggregated, objective_specs)
         score = _sanitise(score, "final")
         objective_values = (
-            _evaluate_multi_objective(aggregated) if multi_objective else None
+            evaluate_objective_values(aggregated, objective_specs, non_finite_penalty)
+            if multi_objective
+            else None
         )
 
         record = {

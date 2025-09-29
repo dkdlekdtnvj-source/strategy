@@ -206,6 +206,41 @@ def _objective_iterator(objectives: Iterable[object]) -> Iterable[ObjectiveSpec]
         yield spec
 
 
+def evaluate_objective_values(
+    metrics: Dict[str, float],
+    objectives: Sequence[ObjectiveSpec],
+    non_finite_penalty: float,
+) -> Tuple[float, ...]:
+    """Transform metric dict into ordered objective values respecting directions."""
+
+    penalty = abs(float(non_finite_penalty))
+    values: List[float] = []
+    for spec in objectives:
+        raw = metrics.get(spec.name)
+        try:
+            numeric = float(raw)
+        except Exception:
+            numeric = float("nan")
+
+        name_lower = spec.name.lower()
+        if name_lower in {"maxdd", "maxdrawdown"}:
+            numeric = abs(numeric) if spec.is_minimize else -abs(numeric)
+
+        if not np.isfinite(numeric):
+            weight = abs(float(spec.weight))
+            if weight == 0:
+                numeric = 0.0
+            else:
+                base = penalty if spec.is_minimize else -penalty
+                numeric = base * weight
+        else:
+            numeric *= float(spec.weight)
+
+        values.append(numeric)
+
+    return tuple(values)
+
+
 def score_metrics(metrics: Dict[str, float], objectives: Iterable[object]) -> float:
     """Score a metric dictionary according to weighted objectives and penalties."""
 
@@ -251,6 +286,7 @@ def score_metrics(metrics: Dict[str, float], objectives: Iterable[object]) -> fl
 __all__ = [
     "Trade",
     "ObjectiveSpec",
+    "evaluate_objective_values",
     "aggregate_metrics",
     "equity_curve_from_returns",
     "max_drawdown",
