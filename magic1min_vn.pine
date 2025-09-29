@@ -752,9 +752,14 @@ bool equitySlopeOK_L=not useEquitySlopeFilter or eqSlope>=0
 bool equitySlopeOK_S=not useEquitySlopeFilter or eqSlope<=0
 float regimeClose = request.security(syminfo.tickerid, ctxHtfTf, close, lookahead=barmerge.lookahead_off)
 float regimeEma = request.security(syminfo.tickerid, ctxHtfTf, ta.ema(close, ctxHtfEmaLen), lookahead=barmerge.lookahead_off)
-float regimeAdx = request.security(syminfo.tickerid, ctxHtfTf, ta.adx(ctxHtfAdxLen), lookahead=barmerge.lookahead_off)
-bool regimeLongOK = not useRegimeFilter or (regimeClose > regimeEma and regimeAdx > ctxHtfAdxTh)
-bool regimeShortOK = not useRegimeFilter or (regimeClose < regimeEma and regimeAdx > ctxHtfAdxTh)
+float regimeAdx = request.security(syminfo.tickerid, ctxHtfTf, f_adx(ctxHtfAdxLen), lookahead=barmerge.lookahead_off)
+float regimeCloseVal = useRegimeFilter ? nz(regimeClose, close) : close
+float currentEma = ta.ema(close, ctxHtfEmaLen)
+float regimeEmaVal = useRegimeFilter ? nz(regimeEma, currentEma) : currentEma
+float currentAdx = f_adx(ctxHtfAdxLen)
+float regimeAdxVal = useRegimeFilter ? nz(regimeAdx, currentAdx) : currentAdx
+bool regimeLongOK = not useRegimeFilter or (regimeCloseVal > regimeEmaVal and regimeAdxVal > ctxHtfAdxTh)
+bool regimeShortOK = not useRegimeFilter or (regimeCloseVal < regimeEmaVal and regimeAdxVal > ctxHtfAdxTh)
 
 // --- 최종 진입 조건 결합 ---
 bool ctxLongOk = regimeLongOK and slopeOK_L and distanceOK_L and equitySlopeOK_L
