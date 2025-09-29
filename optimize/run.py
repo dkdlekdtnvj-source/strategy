@@ -1280,7 +1280,9 @@ def optimisation_loop(
     try:
         if use_llm and llm_count > 0 and 0 < llm_initial < n_trials:
             _run_optuna(llm_initial)
-            candidates = generate_llm_candidates(space, study.trials, llm_cfg)
+            candidates = generate_llm_candidates(
+                space, study.trials, llm_cfg, objective_specs
+            )
             for candidate in candidates[:llm_count]:
                 trial_params = dict(candidate)
                 trial_params.update(forced_params)
