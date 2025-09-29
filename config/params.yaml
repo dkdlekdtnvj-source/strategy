@@ -70,7 +70,8 @@ validation:
 llm:
   enabled: true
   model: "gemini-2.0-flash-exp"
-  api_key: "AIzaSyDD1i5TbCqfWEMFunoxtvnpnr0VW3XZtsY"
+  # 환경 변수 사용을 권장하며 샘플 파일에는 빈 문자열을 기본값으로 둡니다.
+  api_key: ""
   api_key_env: "GEMINI_API_KEY"
   top_n: 12
   count: 8

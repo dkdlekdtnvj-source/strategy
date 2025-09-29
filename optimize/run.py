@@ -1184,11 +1184,20 @@ def optimisation_loop(
         if multi_objective:
             objective_values: List[float] = []
             for spec in objective_specs:
+                direction = spec.get("direction", "maximize")
                 value = aggregated.get(spec["name"])
                 if value is None or not np.isfinite(float(value)):
-                    objective_values.append(non_finite_penalty)
-                else:
-                    objective_values.append(float(value))
+                    penalty = (
+                        abs(non_finite_penalty) if direction == "minimize" else non_finite_penalty
+                    )
+                    if penalty == 0:
+                        penalty = 1e12 if direction == "minimize" else -1e12
+                    objective_values.append(float(penalty))
+                    continue
+                numeric = float(value)
+                if direction == "minimize":
+                    numeric = abs(numeric)
+                objective_values.append(numeric)
             record["optuna_values"] = objective_values
             with results_lock:
                 results.append(record)
