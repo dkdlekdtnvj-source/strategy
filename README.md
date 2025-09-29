@@ -77,8 +77,10 @@ pip install -r requirements.txt
   Outputs are written to `reports/` (`results.csv`, `results_datasets.csv`,
   `results_timeframe_summary.csv`, `results_timeframe_rankings.csv`, `best.json`,
   `heatmap.png`) along with a machine-readable `trials/` 폴더(`trials.jsonl`,
-  `best.yaml`, `trials_final.csv`). These files are flushed after **every** trial so
-  you still keep the trail even if the run is interrupted. The `results_datasets.csv`
+  `trials_live.csv`, `best.yaml`, `trials_final.csv`). `trials_live.csv` 는 각
+  트라이얼이 끝날 때마다 즉시 행이 추가되므로, 중간에 실행을 중단하더라도
+  이미 탐색한 파라미터/지표 히스토리를 엑셀에서 바로 열어볼 수 있습니다.
+  The `results_datasets.csv`
   file is especially useful for answering
   “어떤 LTF/HTF 조합이 가장 좋은가요?” because every dataset row lists the symbol,
   LTF, HTF, and the full metric set (Net Profit, Sortino, Profit Factor, MaxDD,
@@ -110,8 +112,8 @@ Optuna 트라이얼을 먼저 수행한 뒤 Gemini API에 "탑 트라이얼 요�
 평가합니다.
 
 - API 키는 `GEMINI_API_KEY` 환경변수 또는 `llm.api_key` 항목에서 읽습니다. 샘플
-  프로필에는 요청하신 무료 키가 기본값으로 포함돼 있지만, 운영 환경에서는 환경
-  변수 사용을 권장합니다.
+  설정에는 기본값을 비워 두었으므로, 반드시 자체 발급 키를 환경 변수로 주입하거나
+  `params.yaml` 에 직접 입력 후 버전 관리에서 제외해주세요.
 - 기본 모델은 `gemini-2.0-flash-exp` 이며 `top_n`/`count` 값으로 참고할 트라이얼
   수와 제안 받을 후보 수를 제어할 수 있습니다.
 - `google-genai` 패키지가 설치돼 있지 않으면 경고만 출력하고 LLM 단계를 건너뜁니다.
@@ -119,7 +121,7 @@ Optuna 트라이얼을 먼저 수행한 뒤 Gemini API에 "탑 트라이얼 요�
 예시:
 
 ```bash
-export GEMINI_API_KEY="AIzaSyDD1i5TbCqfWEMFunoxtvnpnr0VW3XZtsY"
+export GEMINI_API_KEY="<YOUR_GEMINI_API_KEY>"
 python -m optimize.run --params config/params.yaml --backtest config/backtest.yaml
 ```
 
@@ -145,7 +147,25 @@ pytest
 - Metrics include Net Profit, Max Drawdown, Sortino, Sharpe, Profit Factor, Win Rate,
   weekly net profit, expectancy, RR, average MFE/MAE, and average holding period. The
   optimiser combines weighted objectives with penalties for breaching the risk gates and
-  can optionally re-score the top trials by walk-forward OOS mean.
+  can optionally re-score the top trials by walk-forward OOS mean. 각 목표 지표는
+  `direction`(maximize/minimize)을 명시할 수 있으며, `search.multi_objective=true`
+  설정 시 Optuna 파레토 탐색으로 전환됩니다.
+- `strategy` 블록에서 사용할 파이썬 전략 클래스를 모듈/클래스로 지정할 수 있어
+  동일한 최적화 파이프라인으로 다양한 전략을 플러그인 형태로 교체할 수 있습니다.
+- `search.n_jobs` 를 `auto` 로 두면 시스템 CPU 코어 수에 맞춰 병렬 최적화가 동작하며,
+  다중 스레드 환경에서도 로그/결과 기록이 안전하게 직렬화됩니다.
+- `search.best_metric` / `search.best_metric_direction` 으로 최종 베스트 후보를
+  어떤 지표(기본: ProfitFactor)와 방향으로 선정할지 정의할 수 있습니다. 내부 스코어와
+  무관하게 지정한 지표가 가장 우수한 트라이얼이 `best.json` 등에 기록됩니다.
+- `search.refine` 블록을 활성화하면 일정 주기마다 현재 상위 트라이얼을 기준으로
+  국소 돌연변이 파라미터를 자동 큐잉해 탐색이 빠르게 수렴하도록 돕습니다.
+- `combine_metrics` 는 이제 각 데이터셋의 수익률 시리즈와 트레이드 리스트를 사용해
+  실제 포트폴리오 기준으로 성과·위험 지표(ProfitFactor, MaxDD 등)를 재계산합니다.
+- 최적화 중 `trials.jsonl` 에는 NetProfit/ProfitFactor/Sortino/MaxDD/Trades 등 핵심 지표가
+  함께 기록되며, 리포트 생성 시 Optuna 파라미터 중요도 JSON과 시각화가 추가됩니다.
+- `validation.in_objective` 옵션을 사용하면 지정한 주기로 경량 Walk-forward 점수를
+  산출해 본 점수와 가중 평균하거나, 로그에 별도 기록하여 과최적화를 조기 감지할 수
+  있습니다.
 - Optimisation state is stored in `studies/<symbol>_<ltf>_<htf>.db` (SQLite + heartbeat)
   so 중단 후 재실행 시 자동으로 이어달리기(warm start)가 됩니다. JSONL/YAML 로그는
   최적화 도중 예기치 못한 종료가 발생해도 남도록 `trials/` 폴더에 즉시 기록됩니다.
