@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import importlib
 import inspect
@@ -783,13 +784,15 @@ def optimisation_loop(
     log_dir_path: Optional[Path] = Path(log_dir) if log_dir else None
     trial_log_path: Optional[Path] = None
     best_yaml_path: Optional[Path] = None
-    final_csv_path: Optional[Path] = None
+    live_csv_path: Optional[Path] = None
+    summary_csv_path: Optional[Path] = None
     if log_dir_path:
         log_dir_path.mkdir(parents=True, exist_ok=True)
         trial_log_path = log_dir_path / "trials.jsonl"
         best_yaml_path = log_dir_path / "best.yaml"
-        final_csv_path = log_dir_path / "trials_final.csv"
-        for candidate in (trial_log_path, best_yaml_path, final_csv_path):
+        live_csv_path = log_dir_path / "trials_live.csv"
+        summary_csv_path = log_dir_path / "trials_final.csv"
+        for candidate in (trial_log_path, best_yaml_path, live_csv_path, summary_csv_path):
             if candidate.exists():
                 candidate.unlink()
     non_finite_penalty = float(search_cfg.get("non_finite_penalty", NON_FINITE_PENALTY))
@@ -806,6 +809,32 @@ def optimisation_loop(
         n_jobs = cpu_count
 
     llm_cfg = params_cfg.get("llm", {}) if isinstance(params_cfg.get("llm"), dict) else {}
+
+    def _normalise_metric_direction(name: str, direction: Optional[str]) -> str:
+        if direction:
+            lowered = str(direction).lower()
+            if lowered in {"maximize", "max", "maximise"}:
+                return "maximize"
+            if lowered in {"minimize", "min", "minimise"}:
+                return "minimize"
+        lowered_name = str(name).lower()
+        if lowered_name in {"maxdd", "maxdrawdown", "max_drawdown", "drawdown"}:
+            return "minimize"
+        return "maximize"
+
+    best_metric_name = str(search_cfg.get("best_metric") or "ProfitFactor")
+    best_metric_direction = _normalise_metric_direction(
+        best_metric_name, search_cfg.get("best_metric_direction")
+    )
+
+    refine_cfg = search_cfg.get("refine", {}) if isinstance(search_cfg.get("refine"), dict) else {}
+    refine_enabled = bool(refine_cfg.get("enabled"))
+    refine_interval = max(int(refine_cfg.get("interval", 10)), 1)
+    refine_warmup = max(int(refine_cfg.get("warmup", refine_interval)), 1)
+    refine_top = max(int(refine_cfg.get("top", 3)), 1)
+    refine_mutations = max(int(refine_cfg.get("mutations", 2)), 1)
+    refine_scale = float(refine_cfg.get("scale", 0.15))
+    refine_rng = np.random.default_rng(seed)
 
     if algo == "grid":
         sampler = optuna.samplers.GridSampler(grid_choices(space))
@@ -869,14 +898,23 @@ def optimisation_loop(
         trial_params = dict(params)
         trial_params.update(forced_params)
         try:
-            study.enqueue_trial(trial_params, skip_if_exists=True)
+            with enqueue_lock:
+                study.enqueue_trial(trial_params, skip_if_exists=True)
         except Exception:
             continue
 
     results: List[Dict[str, object]] = []
     results_lock = Lock()
     log_lock = Lock()
-    best_state = {"score": float("-inf"), "trial": None, "params": None}
+    enqueue_lock = Lock()
+    refine_rng_lock = Lock()
+    best_state = {
+        "rank": float("-inf"),
+        "metric_value": None,
+        "score": float("-inf"),
+        "trial": None,
+        "params": None,
+    }
     best_state_lock = Lock()
 
     def _to_native(value: object) -> object:
@@ -916,16 +954,80 @@ def optimisation_loop(
             with trial_log_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    csv_lock = Lock()
+    csv_state = {"header_written": False}
+
+    def _append_csv_row(record: Dict[str, object]) -> None:
+        if live_csv_path is None:
+            return
+        metrics = record.get("metrics", {}) if isinstance(record.get("metrics"), dict) else {}
+        row = {
+            "trial": record.get("trial"),
+            "score": record.get("score"),
+            "primary_metric": metrics.get(best_metric_name),
+            "primary_metric_name": best_metric_name,
+            "profit_factor": metrics.get("ProfitFactor"),
+            "sortino": metrics.get("Sortino"),
+            "max_dd": metrics.get("MaxDD"),
+            "net_profit": metrics.get("NetProfit"),
+            "trades": metrics.get("Trades"),
+            "wf_oos": (record.get("inline_validation") or {}).get("oos_mean")
+            if isinstance(record.get("inline_validation"), dict)
+            else None,
+            "params_json": json.dumps(record.get("params", {}), ensure_ascii=False),
+        }
+        fieldnames = list(row.keys())
+        with csv_lock:
+            need_header = not csv_state["header_written"] or not live_csv_path.exists()
+            with live_csv_path.open("a", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fieldnames)
+                if need_header:
+                    writer.writeheader()
+                    csv_state["header_written"] = True
+                writer.writerow(row)
+
     callbacks: List = []
     if trial_log_path is not None:
         callbacks.append(_log_trial)
 
-    def _update_best_snapshot(record: Dict[str, object], score_value: float) -> None:
+    def _rank_metric_value(value: Optional[float]) -> float:
+        if value is None:
+            return float("-inf")
+        try:
+            numeric = float(value)
+        except Exception:
+            return float("-inf")
+        if np.isnan(numeric):
+            return float("-inf")
+        if np.isinf(numeric):
+            if best_metric_direction == "maximize" and numeric > 0:
+                return float("inf")
+            return float("-inf")
+        if not np.isfinite(numeric):
+            return float("-inf")
+        if best_metric_direction == "minimize":
+            return -abs(numeric)
+        return numeric
+
+    def _update_best_snapshot(
+        record: Dict[str, object], score_value: float, metric_value: Optional[float]
+    ) -> None:
         if not np.isfinite(score_value):
             return
+        rank_value = _rank_metric_value(metric_value)
+        if rank_value == float("-inf") and metric_value is None:
+            return
         with best_state_lock:
-            if score_value <= best_state["score"]:
+            if rank_value < best_state["rank"]:
                 return
+            if (
+                np.isfinite(best_state["rank"])
+                and np.isclose(rank_value, best_state["rank"])
+                and score_value <= best_state["score"]
+            ):
+                return
+            best_state["rank"] = rank_value
+            best_state["metric_value"] = metric_value if metric_value is not None else None
             best_state["score"] = score_value
             best_state["trial"] = record.get("trial")
             best_state["params"] = record.get("params")
@@ -936,7 +1038,14 @@ def optimisation_loop(
                 for key, val in (record.get("params") or {}).items()
             }
             snapshot = {
-                "best_value": float(score_value),
+                "best_metric": best_metric_name,
+                "best_metric_direction": best_metric_direction,
+                "best_metric_value": (
+                    float(metric_value)
+                    if metric_value is not None and np.isfinite(float(metric_value))
+                    else None
+                ),
+                "best_score": float(score_value),
                 "best_params": params_payload,
                 "trial": record.get("trial"),
             }
@@ -1052,6 +1161,11 @@ def optimisation_loop(
             except Exception:
                 continue
 
+        raw_metric_value = aggregated.get(best_metric_name)
+        try:
+            metric_value = float(raw_metric_value) if raw_metric_value is not None else None
+        except Exception:
+            metric_value = None
         record = {
             "trial": trial.number,
             "params": params,
@@ -1061,6 +1175,8 @@ def optimisation_loop(
             "valid": aggregated.get("Valid", True),
             "dataset_key": {"timeframe": key[0], "htf_timeframe": key[1]},
             "pruned": False,
+            "primary_metric": metric_value,
+            "primary_metric_name": best_metric_name,
         }
         if inline_summary is not None:
             record["inline_validation"] = inline_summary
@@ -1076,32 +1192,71 @@ def optimisation_loop(
             record["optuna_values"] = objective_values
             with results_lock:
                 results.append(record)
-            _update_best_snapshot(record, score)
+            _update_best_snapshot(record, score, metric_value)
             LOGGER.info(
-                "Trial %s 완료 score=%.4f PF=%.3f Sortino=%.3f DD=%.3f Trades=%s",
+                "Trial %s 완료 score=%.4f %s=%.3f PF=%.3f Sortino=%.3f DD=%.3f Trades=%s",
                 trial.number,
                 score,
+                best_metric_name,
+                float(metric_value) if metric_value is not None else float("nan"),
                 aggregated.get("ProfitFactor"),
                 aggregated.get("Sortino"),
                 aggregated.get("MaxDD"),
                 aggregated.get("Trades"),
             )
+            _append_csv_row(record)
             return tuple(objective_values)
 
         with results_lock:
             results.append(record)
 
-        _update_best_snapshot(record, score)
+        _update_best_snapshot(record, score, metric_value)
 
         LOGGER.info(
-            "Trial %s 완료 score=%.4f PF=%.3f Sortino=%.3f DD=%.3f Trades=%s",
+            "Trial %s 완료 score=%.4f %s=%.3f PF=%.3f Sortino=%.3f DD=%.3f Trades=%s",
             trial.number,
             score,
+            best_metric_name,
+            float(metric_value) if metric_value is not None else float("nan"),
             aggregated.get("ProfitFactor"),
             aggregated.get("Sortino"),
             aggregated.get("MaxDD"),
             aggregated.get("Trades"),
         )
+
+        _append_csv_row(record)
+
+        if refine_enabled and (trial.number + 1) >= refine_warmup and (
+            (trial.number + 1) % refine_interval == 0
+        ):
+            rng = refine_rng
+            with results_lock:
+                ranked = sorted(
+                    results,
+                    key=lambda r: _rank_metric_value(r.get("primary_metric")),
+                    reverse=True,
+                )
+                top_candidates = [
+                    r for r in ranked if r.get("params") and r.get("primary_metric") is not None
+                ][:refine_top]
+            if top_candidates:
+                for candidate in top_candidates:
+                    for _ in range(refine_mutations):
+                        with refine_rng_lock:
+                            mutated = mutate_around(
+                                candidate["params"], space, scale=refine_scale, rng=rng
+                            )
+                        mutated.update(forced_params)
+                        try:
+                            with enqueue_lock:
+                                trial.study.enqueue_trial(mutated, skip_if_exists=True)
+                        except Exception as exc:
+                            LOGGER.debug(
+                                "Refine enqueue 실패 trial=%s params=%s 오류=%s",
+                                candidate.get("trial"),
+                                mutated,
+                                exc,
+                            )
 
         return score
 
@@ -1130,7 +1285,8 @@ def optimisation_loop(
                 trial_params = dict(candidate)
                 trial_params.update(forced_params)
                 try:
-                    study.enqueue_trial(trial_params, skip_if_exists=True)
+                    with enqueue_lock:
+                        study.enqueue_trial(trial_params, skip_if_exists=True)
                 except Exception as exc:
                     LOGGER.debug("Failed to enqueue LLM candidate %s: %s", candidate, exc)
             remaining = n_trials - llm_initial
@@ -1138,13 +1294,13 @@ def optimisation_loop(
         else:
             _run_optuna(n_trials)
     finally:
-        if final_csv_path is not None:
+        if summary_csv_path is not None:
             try:
                 df = study.trials_dataframe()
             except Exception:
                 df = None
             if df is not None:
-                df.to_csv(final_csv_path, index=False)
+                df.to_csv(summary_csv_path, index=False)
 
     if not results:
         raise RuntimeError("No completed trials were produced during optimisation.")
@@ -1154,6 +1310,16 @@ def optimisation_loop(
         best_trial_num = int(best_state["trial"])
         best_record = next((res for res in results if res["trial"] == best_trial_num), None)
     if best_record is None:
+        ranked_results = sorted(
+            results,
+            key=lambda r: _rank_metric_value(r.get("primary_metric")),
+            reverse=True,
+        )
+        if ranked_results:
+            top_rank = _rank_metric_value(ranked_results[0].get("primary_metric"))
+            if top_rank != float("-inf"):
+                best_record = ranked_results[0]
+    if best_record is None:
         try:
             best_trial_num = study.best_trial.number
             best_record = next((res for res in results if res["trial"] == best_trial_num), None)
@@ -1161,7 +1327,14 @@ def optimisation_loop(
             best_record = None
     if best_record is None:
         best_record = max(results, key=lambda r: r.get("score", float("-inf")))
-    return {"study": study, "results": results, "best": best_record}
+    if best_record is not None:
+        best_record.setdefault("primary_metric_name", best_metric_name)
+    return {
+        "study": study,
+        "results": results,
+        "best": best_record,
+        "best_metric": {"name": best_metric_name, "direction": best_metric_direction},
+    }
 
 
 def merge_dicts(primary: Dict[str, float], secondary: Dict[str, float]) -> Dict[str, float]:
@@ -1409,6 +1582,36 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         )
 
     best_record = optimisation["best"]
+    if best_record is None:
+        raise RuntimeError("최적화 결과에서 베스트 트라이얼을 찾을 수 없습니다.")
+    best_metric_info = optimisation.get("best_metric") or {}
+    best_metric_name = (
+        best_metric_info.get("name")
+        or best_record.get("primary_metric_name")
+        or "ProfitFactor"
+    )
+    best_metric_direction = str(best_metric_info.get("direction") or "maximize").lower()
+    if best_metric_direction not in {"maximize", "minimize"}:
+        lowered = best_metric_name.lower()
+        best_metric_direction = "minimize" if lowered in {"maxdd", "maxdrawdown", "drawdown"} else "maximize"
+
+    def _rank_candidate(value: Optional[object]) -> float:
+        if value is None:
+            return float("-inf")
+        try:
+            numeric = float(value)
+        except Exception:
+            return float("-inf")
+        if np.isnan(numeric):
+            return float("-inf")
+        if np.isinf(numeric):
+            if best_metric_direction == "maximize" and numeric > 0:
+                return float("inf")
+            return float("-inf")
+        if best_metric_direction == "minimize":
+            return -abs(numeric)
+        return numeric
+
     best_key, best_group = _resolve_record_dataset(best_record)
     primary_dataset = _pick_primary_dataset(best_group)
 
@@ -1453,12 +1656,21 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
             "params": best_record.get("params"),
             "timeframe": best_key[0],
             "htf_timeframe": best_key[1],
+            "primary_metric": best_record.get("primary_metric"),
+            "primary_metric_name": best_metric_name,
         }
     ]
 
     top_k = args.top_k or int(params_cfg.get("search", {}).get("top_k", 0))
     if top_k > 0:
-        sorted_results = sorted(optimisation["results"], key=lambda r: r.get("score", 0.0), reverse=True)
+        sorted_results = sorted(
+            optimisation["results"],
+            key=lambda r: (
+                _rank_candidate(r.get("primary_metric")),
+                r.get("score", float("-inf")),
+            ),
+            reverse=True,
+        )
         best_oos = wf_summary.get("oos_mean", float("-inf"))
         wf_cache = {best_record["trial"]: wf_summary}
         for record in sorted_results[:top_k]:
@@ -1486,6 +1698,8 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
                     "params": record.get("params"),
                     "timeframe": candidate_key[0],
                     "htf_timeframe": candidate_key[1],
+                    "primary_metric": record.get("primary_metric"),
+                    "primary_metric_name": best_metric_name,
                 }
             )
             candidate_oos = candidate_wf.get("oos_mean", float("-inf"))
@@ -1505,6 +1719,8 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         "params": best_record.get("params"),
         "timeframe": best_key[0],
         "htf_timeframe": best_key[1],
+        "primary_metric": best_record.get("primary_metric"),
+        "primary_metric_name": best_metric_name,
     }
 
     wf_summary["candidates"] = candidate_summaries
@@ -1521,6 +1737,8 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
             "metrics": trial_record.get("metrics"),
             "timeframe": item.get("timeframe"),
             "htf_timeframe": item.get("htf_timeframe"),
+            "primary_metric": item.get("primary_metric"),
+            "primary_metric_name": item.get("primary_metric_name", best_metric_name),
         }
         if cv_summary:
             entry["cv_mean"] = cv_summary.get("mean")
@@ -1557,6 +1775,11 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         "study_storage": str(study_storage) if study_storage else None,
         "regime": regime_summary.__dict__,
         "cli": list(argv or []),
+        "best_metric": {
+            "name": best_metric_name,
+            "direction": best_metric_direction,
+            "value": best_record.get("primary_metric"),
+        },
     }
     if validation_manifest:
         manifest["validation"] = validation_manifest
@@ -1583,6 +1806,14 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         study=optimisation.get("study"),
     )
 
+    best_metric_value = best_record.get("primary_metric")
+    LOGGER.info(
+        "최적 trial=%s %s=%.4f (score=%.4f)",
+        best_record.get("trial"),
+        best_metric_name,
+        float(best_metric_value) if best_metric_value is not None else float("nan"),
+        best_record.get("score"),
+    )
     LOGGER.info("Run complete. Outputs saved to %s", output_dir)
 
 

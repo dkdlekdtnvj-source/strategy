@@ -77,8 +77,10 @@ pip install -r requirements.txt
   Outputs are written to `reports/` (`results.csv`, `results_datasets.csv`,
   `results_timeframe_summary.csv`, `results_timeframe_rankings.csv`, `best.json`,
   `heatmap.png`) along with a machine-readable `trials/` 폴더(`trials.jsonl`,
-  `best.yaml`, `trials_final.csv`). These files are flushed after **every** trial so
-  you still keep the trail even if the run is interrupted. The `results_datasets.csv`
+  `trials_live.csv`, `best.yaml`, `trials_final.csv`). `trials_live.csv` 는 각
+  트라이얼이 끝날 때마다 즉시 행이 추가되므로, 중간에 실행을 중단하더라도
+  이미 탐색한 파라미터/지표 히스토리를 엑셀에서 바로 열어볼 수 있습니다.
+  The `results_datasets.csv`
   file is especially useful for answering
   “어떤 LTF/HTF 조합이 가장 좋은가요?” because every dataset row lists the symbol,
   LTF, HTF, and the full metric set (Net Profit, Sortino, Profit Factor, MaxDD,
@@ -152,6 +154,11 @@ pytest
   동일한 최적화 파이프라인으로 다양한 전략을 플러그인 형태로 교체할 수 있습니다.
 - `search.n_jobs` 를 `auto` 로 두면 시스템 CPU 코어 수에 맞춰 병렬 최적화가 동작하며,
   다중 스레드 환경에서도 로그/결과 기록이 안전하게 직렬화됩니다.
+- `search.best_metric` / `search.best_metric_direction` 으로 최종 베스트 후보를
+  어떤 지표(기본: ProfitFactor)와 방향으로 선정할지 정의할 수 있습니다. 내부 스코어와
+  무관하게 지정한 지표가 가장 우수한 트라이얼이 `best.json` 등에 기록됩니다.
+- `search.refine` 블록을 활성화하면 일정 주기마다 현재 상위 트라이얼을 기준으로
+  국소 돌연변이 파라미터를 자동 큐잉해 탐색이 빠르게 수렴하도록 돕습니다.
 - `combine_metrics` 는 이제 각 데이터셋의 수익률 시리즈와 트레이드 리스트를 사용해
   실제 포트폴리오 기준으로 성과·위험 지표(ProfitFactor, MaxDD 등)를 재계산합니다.
 - 최적화 중 `trials.jsonl` 에는 NetProfit/ProfitFactor/Sortino/MaxDD/Trades 등 핵심 지표가

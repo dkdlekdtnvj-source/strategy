@@ -135,6 +135,10 @@ def export_best(best: Dict[str, object], wf_summary: Dict[str, object], output_d
         "metrics": best.get("metrics"),
         "score": best.get("score"),
         "datasets": best.get("datasets", []),
+        "primary_metric": {
+            "name": best.get("primary_metric_name"),
+            "value": best.get("primary_metric"),
+        },
         "walk_forward": {
             "oos_mean": wf_summary.get("oos_mean"),
             "oos_median": wf_summary.get("oos_median"),
