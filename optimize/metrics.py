@@ -26,6 +26,26 @@ class Trade:
     reason: str = ""
 
 
+@dataclass(frozen=True)
+class ObjectiveSpec:
+    """Normalised representation of an optimisation objective."""
+
+    name: str
+    weight: float = 1.0
+    goal: str = "maximize"
+
+    @property
+    def direction(self) -> str:
+        goal = str(self.goal).lower()
+        if goal in {"minimise", "minimize", "min", "lower"}:
+            return "minimize"
+        return "maximize"
+
+    @property
+    def is_minimize(self) -> bool:
+        return self.direction == "minimize"
+
+
 def equity_curve_from_returns(returns: pd.Series, initial: float = 1.0) -> pd.Series:
     """Create an equity curve from percentage returns."""
 
@@ -145,31 +165,67 @@ def aggregate_metrics(trades: List[Trade], returns: pd.Series) -> Dict[str, floa
     return metrics
 
 
-def _objective_iterator(objectives: Iterable[object]) -> Iterable[Tuple[str, float]]:
+def normalise_objectives(objectives: Iterable[object]) -> List[ObjectiveSpec]:
+    """Coerce raw objective declarations into :class:`ObjectiveSpec` entries."""
+
+    specs: List[ObjectiveSpec] = []
     for obj in objectives:
+        if isinstance(obj, ObjectiveSpec):
+            specs.append(obj)
+            continue
         if isinstance(obj, str):
-            yield obj, 1.0
-        elif isinstance(obj, dict):
+            specs.append(ObjectiveSpec(name=obj))
+            continue
+        if isinstance(obj, dict):
             name = obj.get("name") or obj.get("metric")
             if not name:
                 continue
             weight = float(obj.get("weight", 1.0))
-            yield str(name), weight
+            if "minimize" in obj:
+                goal = "minimize" if bool(obj.get("minimize")) else "maximize"
+            elif "maximize" in obj:
+                goal = "maximize" if bool(obj.get("maximize")) else "minimize"
+            else:
+                goal_raw = obj.get("goal") or obj.get("direction") or obj.get("target")
+                if goal_raw is None:
+                    goal = "maximize"
+                else:
+                    goal_text = str(goal_raw).lower()
+                    if goal_text in {"min", "minimise", "minimize", "lower"}:
+                        goal = "minimize"
+                    elif goal_text in {"max", "maximise", "maximize", "higher"}:
+                        goal = "maximize"
+                    else:
+                        goal = "maximize"
+            specs.append(ObjectiveSpec(name=str(name), weight=weight, goal=goal))
+    return specs
+
+
+def _objective_iterator(objectives: Iterable[object]) -> Iterable[ObjectiveSpec]:
+    for spec in normalise_objectives(objectives):
+        yield spec
 
 
 def score_metrics(metrics: Dict[str, float], objectives: Iterable[object]) -> float:
     """Score a metric dictionary according to weighted objectives and penalties."""
 
     score = 0.0
-    for name, weight in _objective_iterator(objectives):
-        value = metrics.get(name)
+    for spec in _objective_iterator(objectives):
+        value = metrics.get(spec.name)
         if value is None:
             continue
-        if name.lower() in {"maxdd", "maxdrawdown"}:
-            contribution = -abs(float(value))
+        try:
+            numeric = float(value)
+        except Exception:
+            continue
+        name_lower = spec.name.lower()
+        if name_lower in {"maxdd", "maxdrawdown"}:
+            contribution = -abs(numeric)
+        elif spec.is_minimize:
+            contribution = -numeric
         else:
-            contribution = float(value)
-        score += weight * contribution
+            contribution = numeric
+        score += float(spec.weight) * contribution
 
     trades = float(metrics.get("Trades", 0))
     min_trades = metrics.get("MinTrades")
@@ -194,8 +250,10 @@ def score_metrics(metrics: Dict[str, float], objectives: Iterable[object]) -> fl
 
 __all__ = [
     "Trade",
+    "ObjectiveSpec",
     "aggregate_metrics",
     "equity_curve_from_returns",
     "max_drawdown",
+    "normalise_objectives",
     "score_metrics",
 ]
