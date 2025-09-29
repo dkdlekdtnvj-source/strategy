@@ -894,15 +894,6 @@ def optimisation_loop(
     if space_hash:
         study.set_user_attr("space_hash", space_hash)
 
-    for params in seed_trials or []:
-        trial_params = dict(params)
-        trial_params.update(forced_params)
-        try:
-            with enqueue_lock:
-                study.enqueue_trial(trial_params, skip_if_exists=True)
-        except Exception:
-            continue
-
     results: List[Dict[str, object]] = []
     results_lock = Lock()
     log_lock = Lock()
@@ -916,6 +907,15 @@ def optimisation_loop(
         "params": None,
     }
     best_state_lock = Lock()
+
+    for params in seed_trials or []:
+        trial_params = dict(params)
+        trial_params.update(forced_params)
+        try:
+            with enqueue_lock:
+                study.enqueue_trial(trial_params, skip_if_exists=True)
+        except Exception:
+            continue
 
     def _to_native(value: object) -> object:
         if isinstance(value, np.generic):

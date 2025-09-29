@@ -185,7 +185,7 @@ def score_metrics(metrics: Dict[str, float], objectives: Iterable[object]) -> fl
             continue
         contribution = float(value)
         if direction == "minimize":
-            contribution = -contribution
+            contribution = -abs(contribution)
         score += weight * contribution
 
     trades = float(metrics.get("Trades", 0))
