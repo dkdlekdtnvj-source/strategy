@@ -19,31 +19,59 @@ risk:
   penalty_trade: 0.25
   penalty_hold: 0.1
   penalty_consecutive_loss: 0.5
+strategy:
+  module: "optimize.strategy_model"
+  class: "DefaultStrategy"
+
 objectives:
   - name: NetProfit
     weight: 1.0
+    direction: maximize
   - name: Sortino
     weight: 1.0
+    direction: maximize
   - name: ProfitFactor
     weight: 0.75
+    direction: maximize
   - name: MaxDD
     weight: 0.5
+    direction: minimize
 search:
   algo: bayes
   n_trials: 150
+  n_jobs: auto
+  multi_objective: false
   seed: 42
   top_k: 5
   pruner: asha
   heartbeat_interval: 60
   heartbeat_grace_period: 120
+  best_metric: ProfitFactor
+  best_metric_direction: maximize
+  refine:
+    enabled: true
+    interval: 15
+    warmup: 30
+    top: 3
+    mutations: 2
+    scale: 0.12
 walk_forward:
   train_bars: 0
   test_bars: 0
   step: 0
+validation:
+  in_objective:
+    enabled: false
+    frequency: 10
+    train_bars: 2000
+    test_bars: 1000
+    step: 1000
+    weight: 0.15
 llm:
   enabled: true
   model: "gemini-2.0-flash-exp"
-  api_key: "AIzaSyDD1i5TbCqfWEMFunoxtvnpnr0VW3XZtsY"
+  # 환경 변수 사용을 권장하며 샘플 파일에는 빈 문자열을 기본값으로 둡니다.
+  api_key: ""
   api_key_env: "GEMINI_API_KEY"
   top_n: 12
   count: 8

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -10,22 +11,40 @@ import numpy as np
 import optuna
 import pandas as pd
 import seaborn as sns
+from optuna.importance import get_param_importances
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def _objective_iterator(objectives: Iterable[object]) -> Iterable[Tuple[str, float]]:
+def _normalise_direction(name: str, direction: Optional[str]) -> str:
+    if direction:
+        text = str(direction).lower()
+        if text in {"maximize", "max", "maximise"}:
+            return "maximize"
+        if text in {"minimize", "min", "minimise"}:
+            return "minimize"
+    if name.lower() in {"maxdd", "maxdrawdown"}:
+        return "minimize"
+    return "maximize"
+
+
+def _objective_iterator(objectives: Iterable[object]) -> Iterable[Tuple[str, float, str]]:
     for obj in objectives:
         if isinstance(obj, str):
-            yield obj, 1.0
+            direction = _normalise_direction(obj, None)
+            yield obj, 1.0, direction
         elif isinstance(obj, dict):
             name = obj.get("name") or obj.get("metric")
             if not name:
                 continue
             weight = float(obj.get("weight", 1.0))
-            yield str(name), weight
+            direction = _normalise_direction(name, obj.get("direction") or obj.get("goal"))
+            yield str(name), weight, direction
 
 
 def _flatten_results(results: List[Dict[str, object]]) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -67,10 +86,12 @@ def _annotate_objectives(df: pd.DataFrame, objectives: Iterable[object]) -> pd.D
 
     composite = pd.Series(0.0, index=df.index)
     total_weight = 0.0
-    for name, weight in _objective_iterator(objectives):
+    for name, weight, direction in _objective_iterator(objectives):
         if name not in df.columns:
             continue
         series = df[name].astype(float)
+        if direction == "minimize":
+            series = -series
         std = series.std(ddof=0)
         if std == 0 or np.isnan(std):
             z = pd.Series(0.0, index=df.index)
@@ -114,6 +135,10 @@ def export_best(best: Dict[str, object], wf_summary: Dict[str, object], output_d
         "metrics": best.get("metrics"),
         "score": best.get("score"),
         "datasets": best.get("datasets", []),
+        "primary_metric": {
+            "name": best.get("primary_metric_name"),
+            "value": best.get("primary_metric"),
+        },
         "walk_forward": {
             "oos_mean": wf_summary.get("oos_mean"),
             "oos_median": wf_summary.get("oos_median"),
@@ -199,21 +224,53 @@ def export_timeframe_summary(dataset_df: pd.DataFrame, output_dir: Path) -> None
     rankings.to_csv(output_dir / "results_timeframe_rankings.csv", index=False)
 
 
+def _export_param_importance(study: Optional[optuna.study.Study], output_dir: Path) -> None:
+    if study is None:
+        return
+    try:
+        importances = get_param_importances(study)
+    except Exception as exc:  # pragma: no cover - Optuna 내부 예외 보호
+        LOGGER.warning("파라미터 중요도 계산에 실패했습니다: %s", exc)
+        return
+
+    if not importances:
+        return
+
+    importance_path = output_dir / "param_importance.json"
+    importance_path.write_text(json.dumps(importances, indent=2, ensure_ascii=False))
+
+    labels = list(importances.keys())
+    values = list(importances.values())
+    plots_dir = output_dir / "plots"
+    _ensure_dir(plots_dir)
+    plt.figure(figsize=(8, 5))
+    plt.barh(labels, values, color="steelblue")
+    plt.xlabel("Importance")
+    plt.title("Optuna Parameter Importance")
+    plt.tight_layout()
+    plt.savefig(plots_dir / "param_importance.png")
+    plt.close()
+
+
 def generate_reports(
     results: List[Dict[str, object]],
     best: Dict[str, object],
     wf_summary: Dict[str, object],
     objectives: Iterable[object],
     output_dir: Path,
+    *,
+    study: Optional[optuna.study.Study] = None,
 ) -> None:
     agg_df, dataset_df = export_results(results, objectives, output_dir)
     export_best(best, wf_summary, output_dir)
     export_timeframe_summary(dataset_df, output_dir)
 
     params = list(best.get("params", {}).keys())
-    metric_name = next((name for name, _ in _objective_iterator(objectives)), "NetProfit")
+    metric_name = next((name for name, _, _ in _objective_iterator(objectives)), "NetProfit")
     plots_dir = output_dir / "plots"
     export_heatmap(agg_df, params, metric_name, plots_dir)
+
+    _export_param_importance(study, output_dir)
 
 
 def write_trials_dataframe(study: optuna.study.Study, output_dir: Path) -> None:

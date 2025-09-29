@@ -7,6 +7,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from optimize.strategies.base import StrategyModel
+
 from .metrics import Trade, aggregate_metrics
 
 
@@ -238,11 +240,16 @@ def run_backtest(
     osc = _linreg_series(raw_momentum, osc_len)
     signal_line = osc.rolling(signal_len, min_periods=signal_len).mean()
 
-    base_flux_df = _heikin_ashi(df) if use_flux_heikin else df
-    flux_raw = _directional_flux(base_flux_df, flux_len)
-    flux_smoothed = (
-        flux_raw if flux_smooth_len <= 1 else flux_raw.rolling(flux_smooth_len, min_periods=flux_smooth_len).mean()
-    ).fillna(0.0)
+    if require_flux_filter:
+        base_flux_df = _heikin_ashi(df) if use_flux_heikin else df
+        flux_raw = _directional_flux(base_flux_df, flux_len)
+        flux_smoothed = (
+            flux_raw
+            if flux_smooth_len <= 1
+            else flux_raw.rolling(flux_smooth_len, min_periods=flux_smooth_len).mean()
+        ).fillna(0.0)
+    else:
+        flux_smoothed = pd.Series(0.0, index=df.index)
 
     htf_ok = (
         _align_htf(df.index, htf_df, htf_ema_len)
@@ -584,3 +591,22 @@ def run_backtest(
         and metrics.get("MaxConsecutiveLosses", 0.0) <= max_consec_losses
     )
     return metrics
+
+
+class DefaultStrategy(StrategyModel):
+    """기본 파인 전략 구현."""
+
+    def run_backtest(
+        self,
+        df: pd.DataFrame,
+        params: Dict[str, float | bool],
+        fees: Dict[str, float],
+        risk: Dict[str, float],
+        *,
+        htf_df: Optional[pd.DataFrame] = None,
+        min_trades: Optional[int] = None,
+    ) -> Dict[str, float]:
+        return run_backtest(df, params, fees, risk, htf_df=htf_df, min_trades=min_trades)
+
+
+__all__ = ["DefaultStrategy", "run_backtest"]
