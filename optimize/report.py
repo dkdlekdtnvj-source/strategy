@@ -16,16 +16,12 @@ def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+from optimize.metrics import normalise_objectives
+
+
 def _objective_iterator(objectives: Iterable[object]) -> Iterable[Tuple[str, float]]:
-    for obj in objectives:
-        if isinstance(obj, str):
-            yield obj, 1.0
-        elif isinstance(obj, dict):
-            name = obj.get("name") or obj.get("metric")
-            if not name:
-                continue
-            weight = float(obj.get("weight", 1.0))
-            yield str(name), weight
+    for spec in normalise_objectives(objectives):
+        yield spec.name, float(spec.weight)
 
 
 def _flatten_results(results: List[Dict[str, object]]) -> Tuple[pd.DataFrame, pd.DataFrame]:
