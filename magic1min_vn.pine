@@ -242,6 +242,11 @@ distanceTrendLen = input.int(55, title="이격 비교 EMA 길이", group=gCtxKca
 distanceMaxAtr   = input.float(2.4, title="최대 이격 (ATR)", group=gCtxKcas, minval=0.5, maxval=5.0, step=0.1)
 useEquitySlopeFilter = input.bool(false, title="순자산 기울기 필터", group=gCtxKcas)
 eqSlopeLen       = input.int(120, title="순자산 기울기 길이", group=gCtxKcas, minval=20, maxval=500)
+useRegimeFilter   = input.bool(false, title="레짐 필터 사용", group=gCtxKcas)
+ctxHtfTf          = input.timeframe("15", title="레짐 상위 타임프레임", group=gCtxKcas)
+ctxHtfEmaLen      = input.int(55, title="레짐 EMA Length", group=gCtxKcas, minval=1, maxval=500)
+ctxHtfAdxLen      = input.int(14, title="레짐 ADX Length", group=gCtxKcas, minval=5, maxval=100)
+ctxHtfAdxTh       = input.float(20.0, title="레짐 ADX 임계값", group=gCtxKcas, minval=1.0, maxval=100.0, step=0.5)
 
 // === 6. 부가 기능 및 시각화 ======================================================
 gRev = "6. 부가 기능"
@@ -750,11 +755,19 @@ bool distanceOK_S=distanceOK_L
 float eqSlope=ta.linreg(strategy.equity,eqSlopeLen,0)-ta.linreg(strategy.equity,eqSlopeLen,1)
 bool equitySlopeOK_L=not useEquitySlopeFilter or eqSlope>=0
 bool equitySlopeOK_S=not useEquitySlopeFilter or eqSlope<=0
-float regimeClose = request.security(syminfo.tickerid, ctxHtfTf, close, lookahead=barmerge.lookahead_off)
-float regimeEma = request.security(syminfo.tickerid, ctxHtfTf, ta.ema(close, ctxHtfEmaLen), lookahead=barmerge.lookahead_off)
-float regimeAdx = request.security(syminfo.tickerid, ctxHtfTf, ta.adx(ctxHtfAdxLen), lookahead=barmerge.lookahead_off)
-bool regimeLongOK = not useRegimeFilter or (regimeClose > regimeEma and regimeAdx > ctxHtfAdxTh)
-bool regimeShortOK = not useRegimeFilter or (regimeClose < regimeEma and regimeAdx > ctxHtfAdxTh)
+float regimeClose = na
+float regimeEma = na
+float regimeAdx = na
+if useRegimeFilter
+    regimeClose := request.security(syminfo.tickerid, ctxHtfTf, close, lookahead=barmerge.lookahead_off)
+    regimeEma   := request.security(syminfo.tickerid, ctxHtfTf, ta.ema(close, ctxHtfEmaLen), lookahead=barmerge.lookahead_off)
+    regimeAdx   := request.security(syminfo.tickerid, ctxHtfTf, f_adx(ctxHtfAdxLen), lookahead=barmerge.lookahead_off)
+
+float regimeCloseVal = nz(regimeClose, close)
+float regimeEmaVal = nz(regimeEma, regimeCloseVal)
+float regimeAdxVal = nz(regimeAdx, 0.0)
+bool regimeLongOK = not useRegimeFilter or (regimeCloseVal > regimeEmaVal and regimeAdxVal > ctxHtfAdxTh)
+bool regimeShortOK = not useRegimeFilter or (regimeCloseVal < regimeEmaVal and regimeAdxVal > ctxHtfAdxTh)
 
 // --- 최종 진입 조건 결합 ---
 bool ctxLongOk = regimeLongOK and slopeOK_L and distanceOK_L and equitySlopeOK_L
