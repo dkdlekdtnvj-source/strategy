@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import subprocess
+from collections.abc import Sequence as AbcSequence
 from dataclasses import dataclass
 from datetime import datetime
 from itertools import product
@@ -20,7 +21,14 @@ import pandas as pd
 import yaml
 
 from datafeed.cache import DataCache
-from optimize.metrics import score_metrics
+from optimize.metrics import (
+    ObjectiveSpec,
+    Trade,
+    aggregate_metrics,
+    evaluate_objective_values,
+    normalise_objectives,
+    score_metrics,
+)
 from optimize.report import generate_reports, write_bank_file, write_trials_dataframe
 from optimize.search_spaces import build_space, grid_choices, mutate_around, sample_parameters
 from optimize.strategy_model import run_backtest
@@ -567,43 +575,30 @@ def prepare_datasets(
     return datasets
 
 
-def _nanmean(values: Iterable[float]) -> float:
-    arr = [float(v) for v in values if v is not None]
-    return float(np.nanmean(arr)) if arr else 0.0
-
-
 def combine_metrics(metric_list: List[Dict[str, float]]) -> Dict[str, float]:
     if not metric_list:
         return {}
 
-    total_trades = float(sum(m.get("Trades", 0) for m in metric_list))
-    total_wins = float(sum(m.get("Wins", 0) for m in metric_list))
-    total_losses = float(sum(m.get("Losses", 0) for m in metric_list))
-    gross_profit = float(sum(m.get("GrossProfit", 0.0) for m in metric_list))
-    gross_loss = float(sum(m.get("GrossLoss", 0.0) for m in metric_list))
+    combined_trades: List[Trade] = []
+    combined_returns: List[pd.Series] = []
 
-    combined: Dict[str, float] = {
-        "Trades": total_trades,
-        "Wins": total_wins,
-        "Losses": total_losses,
-        "GrossProfit": gross_profit,
-        "GrossLoss": gross_loss,
-        "NetProfit": _nanmean([m.get("NetProfit", 0.0) for m in metric_list]),
-        "TotalReturn": float(sum(m.get("NetProfit", 0.0) for m in metric_list)),
-        "MaxDD": min(m.get("MaxDD", 0.0) for m in metric_list),
-        "Sortino": _nanmean([m.get("Sortino", 0.0) for m in metric_list]),
-        "Sharpe": _nanmean([m.get("Sharpe", 0.0) for m in metric_list]),
-        "AvgRR": _nanmean([m.get("AvgRR", 0.0) for m in metric_list]),
-        "AvgHoldBars": _nanmean([m.get("AvgHoldBars", 0.0) for m in metric_list]),
-        "AvgMFE": _nanmean([m.get("AvgMFE", 0.0) for m in metric_list]),
-        "AvgMAE": _nanmean([m.get("AvgMAE", 0.0) for m in metric_list]),
-        "WeeklyNetProfit": _nanmean([m.get("WeeklyNetProfit", 0.0) for m in metric_list]),
-        "WeeklyReturnStd": _nanmean([m.get("WeeklyReturnStd", 0.0) for m in metric_list]),
-        "ProfitFactor": (gross_profit / abs(gross_loss)) if gross_loss else float("inf"),
-        "WinRate": (total_wins / total_trades) if total_trades else 0.0,
-        "MaxConsecutiveLosses": max(m.get("MaxConsecutiveLosses", 0.0) for m in metric_list),
-        "Expectancy": _nanmean([m.get("Expectancy", 0.0) for m in metric_list]),
-    }
+    for metrics in metric_list:
+        returns = metrics.get("Returns")
+        if isinstance(returns, pd.Series):
+            combined_returns.append(returns)
+        trades = metrics.get("TradesList")
+        if isinstance(trades, list):
+            combined_trades.extend(trades)
+
+    merged_returns = pd.concat(combined_returns, axis=0) if combined_returns else pd.Series(dtype=float)
+    merged_returns = merged_returns.sort_index()
+    combined_trades.sort(key=lambda trade: (getattr(trade, "entry_time", None), getattr(trade, "exit_time", None)))
+
+    aggregated = aggregate_metrics(combined_trades, merged_returns)
+
+    aggregated["Trades"] = int(aggregated.get("Trades", 0))
+    aggregated["Wins"] = int(aggregated.get("Wins", 0))
+    aggregated["Losses"] = int(aggregated.get("Losses", 0))
 
     base = metric_list[0]
     for key in [
@@ -615,10 +610,10 @@ def combine_metrics(metric_list: List[Dict[str, float]]) -> Dict[str, float]:
         "ConsecutiveLossPenalty",
     ]:
         if key in base:
-            combined[key] = float(base[key])
+            aggregated[key] = float(base[key])
 
-    combined["Valid"] = all(m.get("Valid", True) for m in metric_list)
-    return combined
+    aggregated["Valid"] = all(m.get("Valid", True) for m in metric_list)
+    return aggregated
 
 
 def _clean_metrics(metrics: Dict[str, object]) -> Dict[str, object]:
@@ -664,6 +659,11 @@ def optimisation_loop(
     log_dir: Optional[Path] = None,
 ) -> Dict[str, object]:
     search_cfg = params_cfg.get("search", {})
+    objective_specs: List[ObjectiveSpec] = normalise_objectives(objectives)
+    if not objective_specs:
+        objective_specs = [ObjectiveSpec(name="NetProfit")]
+    multi_objective = bool(search_cfg.get("multi_objective", False)) and len(objective_specs) > 1
+    directions = [spec.direction for spec in objective_specs]
     space = build_space(params_cfg.get("space", {}))
 
     dataset_groups, timeframe_groups, default_key = _group_datasets(datasets)
@@ -720,14 +720,17 @@ def optimisation_loop(
         )
     storage_arg = storage if storage is not None else storage_url
 
-    study = optuna.create_study(
-        direction="maximize",
+    study_kwargs = dict(
         sampler=sampler,
         pruner=pruner,
         study_name=study_name,
         storage=storage_arg,
         load_if_exists=bool(storage_arg),
     )
+    if multi_objective:
+        study = optuna.create_study(directions=directions, **study_kwargs)
+    else:
+        study = optuna.create_study(direction="maximize", **study_kwargs)
     if space_hash:
         study.set_user_attr("space_hash", space_hash)
 
@@ -749,14 +752,23 @@ def optimisation_loop(
     def _log_trial(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         if trial_log_path is None:
             return
-        trial_value: Optional[float]
-        if trial.value is None:
-            trial_value = None
-        else:
+        def _normalise_value(value: object) -> Optional[object]:
+            if value is None:
+                return None
+            if isinstance(value, AbcSequence) and not isinstance(value, (str, bytes, bytearray)):
+                normalised: List[float] = []
+                for item in value:
+                    try:
+                        normalised.append(float(item))
+                    except Exception:
+                        return None
+                return normalised
             try:
-                trial_value = float(trial.value)
+                return float(value)
             except Exception:
-                trial_value = None
+                return None
+
+        trial_value = _normalise_value(trial.value)
         record = {
             "number": trial.number,
             "value": trial_value,
@@ -767,7 +779,7 @@ def optimisation_loop(
         with trial_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        if best_yaml_path is None:
+        if best_yaml_path is None or multi_objective:
             return
         try:
             best_trial = study.best_trial
@@ -775,12 +787,7 @@ def optimisation_loop(
             return
         if best_trial.number != trial.number:
             return
-        best_value = None
-        if best_trial.value is not None:
-            try:
-                best_value = float(best_trial.value)
-            except Exception:
-                best_value = None
+        best_value = _normalise_value(best_trial.value)
         snapshot = {
             "best_value": best_value,
             "best_params": {key: _to_native(val) for key, val in best_trial.params.items()},
@@ -801,20 +808,20 @@ def optimisation_loop(
         dataset_metrics: List[Dict[str, object]] = []
         numeric_metrics: List[Dict[str, float]] = []
 
-        def _sanitise(value: float, stage: str) -> float:
-            try:
-                numeric = float(value)
-            except Exception:
-                numeric = non_finite_penalty
-            if not np.isfinite(numeric):
-                LOGGER.warning(
-                    "Non-finite %s score detected for trial %s; applying penalty %.0e",
-                    stage,
-                    trial.number,
-                    non_finite_penalty,
-                )
-                return non_finite_penalty
-            return numeric
+    def _sanitise(value: float, stage: str) -> float:
+        try:
+            numeric = float(value)
+        except Exception:
+            numeric = non_finite_penalty
+        if not np.isfinite(numeric):
+            LOGGER.warning(
+                "Non-finite %s score detected for trial %s; applying penalty %.0e",
+                stage,
+                trial.number,
+                non_finite_penalty,
+            )
+            return non_finite_penalty
+        return numeric
 
         for idx, dataset in enumerate(selected_datasets, start=1):
             metrics = run_backtest(dataset.df, params, fees, risk, htf_df=dataset.htf)
@@ -828,27 +835,38 @@ def optimisation_loop(
             )
 
             partial_metrics = combine_metrics(numeric_metrics)
-            partial_score = score_metrics(partial_metrics, objectives)
+            partial_score = score_metrics(partial_metrics, objective_specs)
             partial_score = _sanitise(partial_score, f"partial@{idx}")
+            partial_objectives: Optional[Tuple[float, ...]] = (
+                evaluate_objective_values(partial_metrics, objective_specs, non_finite_penalty)
+                if multi_objective
+                else None
+            )
             trial.report(partial_score, step=idx)
             if trial.should_prune():
-                results.append(
-                    {
-                        "trial": trial.number,
-                        "params": params,
-                        "metrics": _clean_metrics(partial_metrics),
-                        "datasets": dataset_metrics,
-                        "score": partial_score,
-                        "valid": partial_metrics.get("Valid", True),
-                        "dataset_key": {"timeframe": key[0], "htf_timeframe": key[1]},
-                        "pruned": True,
-                    }
-                )
+                pruned_record = {
+                    "trial": trial.number,
+                    "params": params,
+                    "metrics": _clean_metrics(partial_metrics),
+                    "datasets": dataset_metrics,
+                    "score": partial_score,
+                    "valid": partial_metrics.get("Valid", True),
+                    "dataset_key": {"timeframe": key[0], "htf_timeframe": key[1]},
+                    "pruned": True,
+                }
+                if partial_objectives is not None:
+                    pruned_record["objective_values"] = list(partial_objectives)
+                results.append(pruned_record)
                 raise optuna.TrialPruned()
 
         aggregated = combine_metrics(numeric_metrics)
-        score = score_metrics(aggregated, objectives)
+        score = score_metrics(aggregated, objective_specs)
         score = _sanitise(score, "final")
+        objective_values = (
+            evaluate_objective_values(aggregated, objective_specs, non_finite_penalty)
+            if multi_objective
+            else None
+        )
 
         record = {
             "trial": trial.number,
@@ -860,7 +878,11 @@ def optimisation_loop(
             "dataset_key": {"timeframe": key[0], "htf_timeframe": key[1]},
             "pruned": False,
         }
+        if objective_values is not None:
+            record["objective_values"] = list(objective_values)
         results.append(record)
+        if multi_objective and objective_values is not None:
+            return objective_values
         return score
 
     def _run_optuna(batch: int) -> None:
@@ -906,9 +928,12 @@ def optimisation_loop(
     if not results:
         raise RuntimeError("No completed trials were produced during optimisation.")
 
-    best_trial = study.best_trial.number
-    best_record = next(res for res in results if res["trial"] == best_trial)
-    return {"study": study, "results": results, "best": best_record}
+    if multi_objective:
+        best_record = max(results, key=lambda res: res.get("score", float("-inf")))
+    else:
+        best_trial = study.best_trial.number
+        best_record = next(res for res in results if res["trial"] == best_trial)
+    return {"study": study, "results": results, "best": best_record, "multi_objective": multi_objective}
 
 
 def merge_dicts(primary: Dict[str, float], secondary: Dict[str, float]) -> Dict[str, float]:
@@ -1078,15 +1103,14 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
     fees = merge_dicts(params_cfg.get("fees", {}), backtest_cfg.get("fees", {}))
     risk = merge_dicts(params_cfg.get("risk", {}), backtest_cfg.get("risk", {}))
 
-    objectives_cfg = params_cfg.get("objectives", [])
-    if isinstance(objectives_cfg, list):
-        objectives: List[str] = list(objectives_cfg)
-    elif isinstance(objectives_cfg, tuple):
-        objectives = list(objectives_cfg)
-    elif objectives_cfg:
-        objectives = list(objectives_cfg)
+    objectives_raw = params_cfg.get("objectives", [])
+    if isinstance(objectives_raw, (list, tuple)):
+        objectives_config: List[object] = list(objectives_raw)
+    elif objectives_raw:
+        objectives_config = [objectives_raw]
     else:
-        objectives = []
+        objectives_config = []
+    objective_specs = normalise_objectives(objectives_config)
     space_hash = _space_hash(params_cfg.get("space", {}))
     primary_for_regime = _pick_primary_dataset(datasets)
     regime_summary = detect_regime_label(primary_for_regime.df)
@@ -1109,7 +1133,7 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
     optimisation = optimisation_loop(
         datasets,
         params_cfg,
-        objectives,
+        objective_specs,
         fees,
         risk,
         forced_params,
@@ -1275,7 +1299,7 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         "symbol": params_cfg.get("symbol"),
         "fees": fees,
         "risk": risk,
-        "objectives": list(objectives),
+        "objectives": [spec.__dict__ for spec in objective_specs],
         "search": params_cfg.get("search", {}),
         "resume_bank": str(resume_bank_path) if resume_bank_path else None,
         "study_storage": str(study_storage) if study_storage else None,
@@ -1302,7 +1326,7 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         optimisation["results"],
         optimisation["best"],
         wf_summary,
-        objectives,
+        objective_specs,
         output_dir,
     )
 
