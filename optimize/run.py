@@ -959,20 +959,20 @@ def optimisation_loop(
         dataset_metrics: List[Dict[str, object]] = []
         numeric_metrics: List[Dict[str, float]] = []
 
-    def _sanitise(value: float, stage: str) -> float:
-        try:
-            numeric = float(value)
-        except Exception:
-            numeric = non_finite_penalty
-        if not np.isfinite(numeric):
-            LOGGER.warning(
-                "Non-finite %s score detected for trial %s; applying penalty %.0e",
-                stage,
-                trial.number,
-                non_finite_penalty,
-            )
-            return non_finite_penalty
-        return numeric
+        def _sanitise(value: float, stage: str) -> float:
+            try:
+                numeric = float(value)
+            except Exception:
+                numeric = non_finite_penalty
+            if not np.isfinite(numeric):
+                LOGGER.warning(
+                    "Non-finite %s score detected for trial %s; applying penalty %.0e",
+                    stage,
+                    trial.number,
+                    non_finite_penalty,
+                )
+                return non_finite_penalty
+            return numeric
 
         for idx, dataset in enumerate(selected_datasets, start=1):
             metrics = run_backtest(dataset.df, params, fees, risk, htf_df=dataset.htf)
