@@ -88,3 +88,24 @@ def test_stop_distance_guard_prevents_entry():
     metrics = run_backtest(df, params, FEES, RISK)
 
     assert metrics["Trades"] == 0
+
+
+def test_timestamp_column_with_invalid_rows_is_cleaned():
+    prices = [100, 101, 102, 103, 104, 105, 106]
+    df = _make_ohlcv(prices)
+    raw = df.reset_index().rename(columns={"index": "timestamp"})
+
+    raw.loc[2, "timestamp"] = None  # invalid timestamp row -> should be dropped
+    raw.loc[3, "close"] = "bad"  # non-numeric OHLC value -> should be coerced then dropped
+    raw = pd.concat([raw, raw.iloc[[0]]], ignore_index=True)
+    raw.loc[len(raw) - 1, "timestamp"] = raw.loc[1, "timestamp"]  # duplicate timestamp
+
+    params = _base_params(useTimeStop=True, maxHoldBars=1)
+
+    metrics = run_backtest(raw, params, FEES, RISK)
+
+    returns = metrics["Returns"]
+    assert isinstance(returns, pd.Series)
+    assert isinstance(returns.index, pd.DatetimeIndex)
+    assert returns.index.tz is not None
+    assert 0 < len(returns) < len(raw)

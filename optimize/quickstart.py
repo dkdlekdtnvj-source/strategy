@@ -115,12 +115,16 @@ def main() -> None:
     disable_tokens: List[str] = []
     if bool_params:
         print("\nToggle optional filters:")
-    for name in bool_params:
-        decision = _prompt_bool(name)
-        if decision is True:
-            enable_tokens.append(name)
-        elif decision is False:
-            disable_tokens.append(name)
+        auto_yes = input("모든 옵션을 예(Enable)로 설정할까요? [y/N]: ").strip().lower()
+        if auto_yes in {"y", "yes"}:
+            enable_tokens.extend(bool_params)
+        else:
+            for name in bool_params:
+                decision = _prompt_bool(name)
+                if decision is True:
+                    enable_tokens.append(name)
+                elif decision is False:
+                    disable_tokens.append(name)
 
     cli_args: List[str] = [
         "--params",

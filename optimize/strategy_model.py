@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -9,6 +10,9 @@ import numpy as np
 import pandas as pd
 
 from .metrics import Trade, aggregate_metrics
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 # =====================================================================================
@@ -264,7 +268,77 @@ def run_backtest(
     if not required_cols.issubset(df.columns):
         raise ValueError("DataFrame must contain OHLCV columns")
 
-    df = df.copy()
+    def _ensure_datetime_index(frame: pd.DataFrame, label: str) -> pd.DataFrame:
+        if isinstance(frame.index, pd.DatetimeIndex):
+            idx = frame.index
+            if idx.tz is None:
+                frame = frame.copy()
+                frame.index = idx.tz_localize("UTC")
+            return frame
+
+        frame = frame.copy()
+        if "timestamp" in frame.columns:
+            converted = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+            valid_mask = converted.notna()
+            invalid = (~valid_mask).sum()
+            if invalid:
+                LOGGER.warning(
+                    "%s 데이터프레임에서 timestamp 컬럼의 %d개 행을 제거했습니다.",
+                    label,
+                    int(invalid),
+                )
+            if valid_mask.any():
+                frame = frame.loc[valid_mask].copy()
+                frame.index = converted[valid_mask]
+                frame.drop(columns=["timestamp"], inplace=True)
+                return frame
+        raise TypeError(
+            f"{label} 데이터프레임은 DatetimeIndex 를 가져야 합니다. "
+            "timestamp 컬럼이 있다면 UTC 로 변환한 뒤 다시 실행해주세요."
+        )
+
+    df = _ensure_datetime_index(df, "가격")
+    if htf_df is not None:
+        htf_df = _ensure_datetime_index(htf_df, "HTF")
+
+    def _normalise_ohlcv(frame: pd.DataFrame, label: str) -> pd.DataFrame:
+        frame = frame.copy()
+        frame.sort_index(inplace=True)
+
+        if frame.index.has_duplicates:
+            dup_count = int(frame.index.duplicated(keep="last").sum())
+            if dup_count:
+                LOGGER.warning("%s 데이터프레임에서 중복 인덱스 %d개를 제거합니다.", label, dup_count)
+            frame = frame[~frame.index.duplicated(keep="last")]
+
+        for column in required_cols:
+            if column not in frame.columns:
+                continue
+            coerced = pd.to_numeric(frame[column], errors="coerce")
+            invalid_count = int((coerced.isna() & frame[column].notna()).sum())
+            if invalid_count:
+                LOGGER.warning(
+                    "%s 데이터프레임의 %s 열에서 비수치 값 %d개를 NaN 으로 치환했습니다.",
+                    label,
+                    column,
+                    invalid_count,
+                )
+            frame[column] = coerced
+
+        before = len(frame)
+        frame = frame.dropna(subset=list(required_cols))
+        dropped = before - len(frame)
+        if dropped:
+            LOGGER.warning("%s 데이터프레임에서 결측 OHLCV 행 %d개를 제거했습니다.", label, int(dropped))
+
+        if len(frame) < 2:
+            raise ValueError(f"{label} 데이터가 부족하여 백테스트를 진행할 수 없습니다.")
+
+        return frame
+
+    df = _normalise_ohlcv(df, "가격")
+    if htf_df is not None:
+        htf_df = _normalise_ohlcv(htf_df, "HTF")
 
     def _coerce_bool(value: object, default: bool) -> bool:
         if value is None:
