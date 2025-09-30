@@ -9,6 +9,7 @@ import logging
 import os
 import subprocess
 from collections.abc import Sequence as AbcSequence
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import product
@@ -20,6 +21,7 @@ import optuna
 import optuna.storages
 import pandas as pd
 import yaml
+import multiprocessing
 
 from datafeed.cache import DataCache
 from optimize.metrics import (
@@ -117,6 +119,21 @@ def _build_run_tag(
     if run_tag:
         parts.append(run_tag)
     return timestamp, symbol_slug, timeframe_slug, "_".join(filter(None, parts))
+
+
+def _run_dataset_backtest_task(
+    dataset: "DatasetSpec",
+    params: Dict[str, object],
+    fees: Dict[str, float],
+    risk: Dict[str, float],
+) -> Dict[str, float]:
+    """Execute ``run_backtest`` for a single dataset.
+
+    This helper is defined at module level so it can be pickled when ``ProcessPoolExecutor``
+    is used for parallel evaluation.
+    """
+
+    return run_backtest(dataset.df, params, fees, risk, htf_df=dataset.htf)
 
 
 def _resolve_output_directory(
@@ -766,6 +783,35 @@ def optimisation_loop(
     if n_jobs > 1:
         LOGGER.info("Optuna 병렬 worker %d개를 사용합니다.", n_jobs)
 
+    raw_dataset_jobs = search_cfg.get("dataset_jobs") or search_cfg.get("dataset_n_jobs", 1)
+    try:
+        dataset_jobs = max(1, int(raw_dataset_jobs))
+    except (TypeError, ValueError):
+        LOGGER.warning(
+            "search.dataset_jobs 값 '%s' 을 해석할 수 없어 1로 대체합니다.", raw_dataset_jobs
+        )
+        dataset_jobs = 1
+
+    dataset_executor = str(search_cfg.get("dataset_executor", "thread") or "thread").lower()
+    if dataset_executor not in {"thread", "process"}:
+        LOGGER.warning(
+            "알 수 없는 dataset_executor '%s' 가 지정되어 thread 모드로 대체합니다.",
+            dataset_executor,
+        )
+        dataset_executor = "thread"
+
+    dataset_start_method_raw = search_cfg.get("dataset_start_method")
+    dataset_start_method = (
+        str(dataset_start_method_raw).lower() if dataset_start_method_raw else None
+    )
+
+    if dataset_jobs > 1:
+        LOGGER.info(
+            "데이터셋 병렬 백테스트 worker %d개 (%s) 사용", dataset_jobs, dataset_executor
+        )
+        if dataset_executor == "process" and dataset_start_method:
+            LOGGER.info("프로세스 start method=%s", dataset_start_method)
+
     algo_raw = search_cfg.get("algo", "bayes")
     algo = str(algo_raw or "bayes").lower()
     seed = search_cfg.get("seed")
@@ -986,32 +1032,22 @@ def optimisation_loop(
         dataset_metrics: List[Dict[str, object]] = []
         numeric_metrics: List[Dict[str, float]] = []
 
-    def _sanitise(value: float, stage: str) -> float:
-        try:
-            numeric = float(value)
-        except Exception:
-            numeric = non_finite_penalty
-        if not np.isfinite(numeric):
-            LOGGER.warning(
-                "Non-finite %s score detected for trial %s; applying penalty %.0e",
-                stage,
-                trial.number,
-                non_finite_penalty,
-            )
-            return non_finite_penalty
-        return numeric
-
-        for idx, dataset in enumerate(selected_datasets, start=1):
+        def _sanitise(value: float, stage: str) -> float:
             try:
-                metrics = run_backtest(dataset.df, params, fees, risk, htf_df=dataset.htf)
+                numeric = float(value)
             except Exception:
-                LOGGER.exception(
-                    "백테스트 실행 중 오류 발생 (dataset=%s, timeframe=%s, htf=%s)",
-                    dataset.name,
-                    dataset.timeframe,
-                    dataset.htf_timeframe,
+                numeric = non_finite_penalty
+            if not np.isfinite(numeric):
+                LOGGER.warning(
+                    "Non-finite %s score detected for trial %s; applying penalty %.0e",
+                    stage,
+                    trial.number,
+                    non_finite_penalty,
                 )
-                raise
+                return non_finite_penalty
+            return numeric
+
+        def _consume_dataset(idx: int, dataset: DatasetSpec, metrics: Dict[str, float]) -> None:
             numeric_metrics.append(metrics)
             dataset_metrics.append(
                 {
@@ -1045,6 +1081,73 @@ def optimisation_loop(
                     pruned_record["objective_values"] = list(partial_objectives)
                 results.append(pruned_record)
                 raise optuna.TrialPruned()
+
+        parallel_enabled = dataset_jobs > 1 and len(selected_datasets) > 1
+        if parallel_enabled:
+            executor_kwargs: Dict[str, object] = {"max_workers": dataset_jobs}
+            if dataset_executor == "process":
+                try:
+                    ctx = (
+                        multiprocessing.get_context(dataset_start_method)
+                        if dataset_start_method
+                        else multiprocessing.get_context("spawn")
+                    )
+                except ValueError:
+                    LOGGER.warning(
+                        "dataset_start_method '%s' 을 사용할 수 없어 기본 spawn 을 사용합니다.",
+                        dataset_start_method,
+                    )
+                    ctx = multiprocessing.get_context("spawn")
+                executor_cls = ProcessPoolExecutor
+                executor_kwargs["mp_context"] = ctx
+            else:
+                executor_cls = ThreadPoolExecutor
+
+            futures = []
+            with executor_cls(**executor_kwargs) as executor:
+                for dataset in selected_datasets:
+                    futures.append(
+                        executor.submit(
+                            _run_dataset_backtest_task,
+                            dataset,
+                            params,
+                            fees,
+                            risk,
+                        )
+                    )
+
+                for idx, (dataset, future) in enumerate(zip(selected_datasets, futures), start=1):
+                    try:
+                        metrics = future.result()
+                    except Exception:
+                        for pending in futures[idx:]:
+                            pending.cancel()
+                        LOGGER.exception(
+                            "백테스트 실행 중 오류 발생 (dataset=%s, timeframe=%s, htf=%s)",
+                            dataset.name,
+                            dataset.timeframe,
+                            dataset.htf_timeframe,
+                        )
+                        raise
+                    try:
+                        _consume_dataset(idx, dataset, metrics)
+                    except optuna.TrialPruned:
+                        for pending in futures[idx:]:
+                            pending.cancel()
+                        raise
+        else:
+            for idx, dataset in enumerate(selected_datasets, start=1):
+                try:
+                    metrics = run_backtest(dataset.df, params, fees, risk, htf_df=dataset.htf)
+                except Exception:
+                    LOGGER.exception(
+                        "백테스트 실행 중 오류 발생 (dataset=%s, timeframe=%s, htf=%s)",
+                        dataset.name,
+                        dataset.timeframe,
+                        dataset.htf_timeframe,
+                    )
+                    raise
+                _consume_dataset(idx, dataset, metrics)
 
         aggregated = combine_metrics(numeric_metrics)
         score = score_metrics(aggregated, objective_specs)
