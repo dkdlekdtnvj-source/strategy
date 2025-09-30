@@ -48,6 +48,12 @@ STUDY_ROOT = Path("studies")
 NON_FINITE_PENALTY = -1e12
 
 
+def _utcnow_isoformat() -> str:
+    """현재 UTC 시각을 ISO8601 ``Z`` 표기 문자열로 반환합니다."""
+
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
 def _slugify_symbol(symbol: str) -> str:
     text = symbol.split(":")[-1]
     return text.replace("/", "").replace(" ", "")
@@ -329,7 +335,7 @@ def _build_bank_payload(
         payload_entries.append({**entry, "regime": regime_info})
 
     return {
-        "created_at": datetime.utcnow().isoformat() + "Z",
+        "created_at": _utcnow_isoformat(),
         "metadata": {
             "symbol": tag_info.get("symbol"),
             "timeframe": tag_info.get("timeframe"),
@@ -1703,7 +1709,7 @@ def _execute_single(
             search_manifest["storage_url"] = "***redacted***"
 
     manifest = {
-        "created_at": datetime.utcnow().isoformat() + "Z",
+        "created_at": _utcnow_isoformat(),
         "run": tag_info,
         "space_hash": space_hash,
         "symbol": params_cfg.get("symbol"),
