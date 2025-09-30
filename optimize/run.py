@@ -10,7 +10,7 @@ import os
 import subprocess
 from collections.abc import Sequence as AbcSequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from itertools import product
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -112,7 +112,7 @@ def _build_run_tag(
     symbol_slug = _slugify_symbol(str(symbol))
     timeframe_slug = str(timeframe).replace("/", "_")
     htf_slug = str(htf).replace("/", "_")
-    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
     parts = [timestamp, symbol_slug, timeframe_slug, htf_slug]
     if run_tag:
         parts.append(run_tag)
