@@ -120,20 +120,52 @@ def _security_series(
     return result.fillna(default)
 
 
-def _max_ignore_nan(current: float, candidate: float) -> float:
-    if np.isnan(candidate):
-        return current
-    if np.isnan(current):
-        return candidate
-    return max(current, candidate)
+def _max_ignore_nan(*values: float) -> float:
+    """NaN 을 무시하면서 최대값을 계산합니다.
+
+    전달된 값이 모두 NaN 이거나 ``None`` 이면 ``np.nan`` 을 돌려 빈 시퀀스에 대한 ``max`` 호출을
+    회피합니다. ``float`` 로 강제 변환 가능한 항목만 고려해 예외 발생 가능성을 낮춥니다.
+    """
+
+    cleaned: List[float] = []
+    for value in values:
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isnan(numeric):
+            continue
+        cleaned.append(numeric)
+
+    if not cleaned:
+        return np.nan
+    return max(cleaned)
 
 
-def _min_ignore_nan(current: float, candidate: float) -> float:
-    if np.isnan(candidate):
-        return current
-    if np.isnan(current):
-        return candidate
-    return min(current, candidate)
+def _min_ignore_nan(*values: float) -> float:
+    """NaN 을 무시하면서 최소값을 계산합니다.
+
+    ``values`` 가 모두 비어 있거나 유효하지 않은 경우 ``np.nan`` 을 반환해 ``min`` 의 빈 시퀀스
+    예외를 방지합니다.
+    """
+
+    cleaned: List[float] = []
+    for value in values:
+        if value is None:
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isnan(numeric):
+            continue
+        cleaned.append(numeric)
+
+    if not cleaned:
+        return np.nan
+    return min(cleaned)
 
 
 def _pivot_series(series: pd.Series, left: int, right: int, is_high: bool) -> pd.Series:
