@@ -919,7 +919,8 @@ def optimisation_loop(
             except Exception:
                 return None
 
-        trial_value = _normalise_value(trial.value)
+        raw_value = trial.values if multi_objective else trial.value
+        trial_value = _normalise_value(raw_value)
         record = {
             "number": trial.number,
             "value": trial_value,
@@ -930,7 +931,7 @@ def optimisation_loop(
         with trial_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        if best_yaml_path is None or multi_objective:
+        if best_yaml_path is None:
             return
         try:
             best_trial = study.best_trial
@@ -938,7 +939,8 @@ def optimisation_loop(
             return
         if best_trial.number != trial.number:
             return
-        best_value = _normalise_value(best_trial.value)
+        best_raw_value = best_trial.values if multi_objective else best_trial.value
+        best_value = _normalise_value(best_raw_value)
         snapshot = {
             "best_value": best_value,
             "best_params": {key: _to_native(val) for key, val in best_trial.params.items()},
