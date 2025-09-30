@@ -756,6 +756,16 @@ def optimisation_loop(
 
     dataset_groups, timeframe_groups, default_key = _group_datasets(datasets)
 
+    raw_n_jobs = search_cfg.get("n_jobs", 1)
+    try:
+        n_jobs = max(1, int(raw_n_jobs))
+    except (TypeError, ValueError):
+        LOGGER.warning("search.n_jobs 값 '%s' 을 해석할 수 없어 1로 대체합니다.", raw_n_jobs)
+        n_jobs = 1
+
+    if n_jobs > 1:
+        LOGGER.info("Optuna 병렬 worker %d개를 사용합니다.", n_jobs)
+
     algo_raw = search_cfg.get("algo", "bayes")
     algo = str(algo_raw or "bayes").lower()
     seed = search_cfg.get("seed")
@@ -992,7 +1002,16 @@ def optimisation_loop(
         return numeric
 
         for idx, dataset in enumerate(selected_datasets, start=1):
-            metrics = run_backtest(dataset.df, params, fees, risk, htf_df=dataset.htf)
+            try:
+                metrics = run_backtest(dataset.df, params, fees, risk, htf_df=dataset.htf)
+            except Exception:
+                LOGGER.exception(
+                    "백테스트 실행 중 오류 발생 (dataset=%s, timeframe=%s, htf=%s)",
+                    dataset.name,
+                    dataset.timeframe,
+                    dataset.htf_timeframe,
+                )
+                raise
             numeric_metrics.append(metrics)
             dataset_metrics.append(
                 {
@@ -1059,6 +1078,7 @@ def optimisation_loop(
         study.optimize(
             objective,
             n_trials=batch,
+            n_jobs=n_jobs,
             show_progress_bar=False,
             callbacks=callbacks,
             gc_after_trial=True,
@@ -1155,6 +1175,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--disable", action="append", default=[], help="Force-disable boolean parameters (comma separated)")
     parser.add_argument("--top-k", type=int, default=0, help="Re-rank top-K trials by walk-forward OOS mean")
     parser.add_argument("--n-trials", type=int, help="Override Optuna trial count")
+    parser.add_argument("--n-jobs", type=int, help="Optuna 병렬 worker 수 (기본 1)")
     parser.add_argument("--study-name", type=str, help="Override Optuna study name")
     parser.add_argument(
         "--study-template",
@@ -1227,6 +1248,14 @@ def _execute_single(
     if args.n_trials is not None:
         search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["n_trials"] = int(args.n_trials)
+
+    if args.n_jobs is not None:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        try:
+            search_cfg["n_jobs"] = max(1, int(args.n_jobs))
+        except (TypeError, ValueError):
+            LOGGER.warning("--n-jobs 값 '%s' 이 올바르지 않아 1로 설정합니다.", args.n_jobs)
+            search_cfg["n_jobs"] = 1
 
     if args.study_name:
         search_cfg = _ensure_dict(params_cfg, "search")

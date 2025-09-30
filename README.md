@@ -71,6 +71,7 @@ pip install -r requirements.txt
    - `--timeframe-grid 1m@15m,3m@1h` 으로 여러 LTF/HTF 조합을 일괄 실행 (필요 시 `--study-template`, `--run-tag-template` 으로 이름 규칙 지정)
    - `--leverage`, `--qty-pct`
    - `--n-trials`
+   - `--n-jobs 4` 처럼 Optuna 병렬 worker 수를 지정해 멀티코어를 활용할 수 있습니다.
    - `--enable name1,name2`, `--disable name3`
    - `--top-k 10` to re-rank the best Optuna trials by walk-forward out-of-sample
      performance.

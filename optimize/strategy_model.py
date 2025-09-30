@@ -264,6 +264,30 @@ def run_backtest(
     if not required_cols.issubset(df.columns):
         raise ValueError("DataFrame must contain OHLCV columns")
 
+    def _ensure_datetime_index(frame: pd.DataFrame, label: str) -> pd.DataFrame:
+        if isinstance(frame.index, pd.DatetimeIndex):
+            idx = frame.index
+            if idx.tz is None:
+                frame = frame.copy()
+                frame.index = idx.tz_localize("UTC")
+            return frame
+
+        frame = frame.copy()
+        if "timestamp" in frame.columns:
+            converted = pd.to_datetime(frame["timestamp"], utc=True, errors="coerce")
+            if converted.notna().all():
+                frame.index = converted
+                frame.drop(columns=["timestamp"], inplace=True)
+                return frame
+        raise TypeError(
+            f"{label} 데이터프레임은 DatetimeIndex 를 가져야 합니다. "
+            "timestamp 컬럼이 있다면 UTC 로 변환한 뒤 다시 실행해주세요."
+        )
+
+    df = _ensure_datetime_index(df, "가격")
+    if htf_df is not None:
+        htf_df = _ensure_datetime_index(htf_df, "HTF")
+
     df = df.copy()
 
     def _coerce_bool(value: object, default: bool) -> bool:
