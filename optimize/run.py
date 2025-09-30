@@ -930,18 +930,35 @@ def optimisation_loop(
         with trial_log_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-        if best_yaml_path is None or multi_objective:
+        if best_yaml_path is None:
             return
-        try:
-            best_trial = study.best_trial
-        except ValueError:
-            return
-        if best_trial.number != trial.number:
-            return
-        best_value = _normalise_value(best_trial.value)
+
+        selected_trial: Optional[optuna.trial.FrozenTrial]
+        if multi_objective:
+            try:
+                pareto_trials = list(study.best_trials)
+            except ValueError:
+                return
+            if not pareto_trials:
+                return
+            selected_trial = next(
+                (best_trial for best_trial in pareto_trials if best_trial.number == trial.number),
+                None,
+            )
+            if selected_trial is None:
+                return
+        else:
+            try:
+                selected_trial = study.best_trial
+            except ValueError:
+                return
+            if selected_trial.number != trial.number:
+                return
+
+        best_value = _normalise_value(selected_trial.value)
         snapshot = {
             "best_value": best_value,
-            "best_params": {key: _to_native(val) for key, val in best_trial.params.items()},
+            "best_params": {key: _to_native(val) for key, val in selected_trial.params.items()},
         }
         with best_yaml_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(snapshot, handle, allow_unicode=True, sort_keys=False)
