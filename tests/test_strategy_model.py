@@ -109,3 +109,26 @@ def test_timestamp_column_with_invalid_rows_is_cleaned():
     assert isinstance(returns.index, pd.DatetimeIndex)
     assert returns.index.tz is not None
     assert 0 < len(returns) < len(raw)
+
+
+def test_short_stop_handles_missing_candidates():
+    prices = [110, 109, 108, 107, 106, 105, 104, 103]
+    df = _make_ohlcv(prices)
+    params = _base_params(
+        allowLongEntry=False,
+        allowShortEntry=True,
+        debugForceLong=False,
+        debugForceShort=True,
+        useStructureGate=True,
+        useBOS=True,
+        useCHOCH=True,
+        useStopLoss=True,
+        stopLookback=3,
+        usePivotStop=True,
+        useTimeStop=True,
+        maxHoldBars=1,
+    )
+
+    metrics = run_backtest(df, params, FEES, RISK)
+
+    assert metrics["Trades"] >= 1
