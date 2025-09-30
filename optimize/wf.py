@@ -7,7 +7,8 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-from .strategy_model import run_backtest
+from optimize.strategies.base import StrategyModel
+from .strategy_model import DefaultStrategy
 
 
 def _clean_metrics(metrics: Dict[str, object]) -> Dict[str, float]:
@@ -28,6 +29,10 @@ class SegmentResult:
     test_end: pd.Timestamp
 
 
+def _resolve_strategy(strategy: Optional[StrategyModel]) -> StrategyModel:
+    return strategy if strategy is not None else DefaultStrategy()
+
+
 def run_walk_forward(
     df: pd.DataFrame,
     params: Dict[str, float | bool],
@@ -37,9 +42,12 @@ def run_walk_forward(
     test_bars: int,
     step: int,
     htf_df: Optional[pd.DataFrame] = None,
+    *,
+    strategy: Optional[StrategyModel] = None,
 ) -> Dict[str, object]:
     segments: List[SegmentResult] = []
     total = len(df)
+    runner = _resolve_strategy(strategy)
 
     if total == 0:
         return {"segments": [], "oos_mean": 0.0, "oos_median": 0.0, "count": 0}
@@ -51,7 +59,8 @@ def run_walk_forward(
     if train_bars <= 0 or train_bars >= total:
         train_bars = total
     if test_bars <= 0 or train_bars + test_bars > total:
-        metrics = run_backtest(df, params, fees, risk, htf_df=htf_df)
+        prepared_df, prepared_htf = runner.prepare_data(df, htf_df, params)
+        metrics = runner.run_backtest(prepared_df, params, fees, risk, htf_df=prepared_htf)
         clean = _clean_metrics(metrics)
         return {
             "segments": segments,
@@ -75,8 +84,11 @@ def run_walk_forward(
         train_htf = htf_df.loc[: train_df.index[-1]] if htf_df is not None else None
         test_htf = htf_df.loc[: test_df.index[-1]] if htf_df is not None else None
 
-        train_metrics = run_backtest(train_df, params, fees, risk, htf_df=train_htf)
-        test_metrics = run_backtest(test_df, params, fees, risk, htf_df=test_htf)
+        train_df_prepared, train_htf_prepared = runner.prepare_data(train_df, train_htf, params)
+        test_df_prepared, test_htf_prepared = runner.prepare_data(test_df, test_htf, params)
+
+        train_metrics = runner.run_backtest(train_df_prepared, params, fees, risk, htf_df=train_htf_prepared)
+        test_metrics = runner.run_backtest(test_df_prepared, params, fees, risk, htf_df=test_htf_prepared)
 
         segments.append(
             SegmentResult(
@@ -110,9 +122,11 @@ def run_purged_kfold(
     k: int = 5,
     embargo: float = 0.01,
     htf_df: Optional[pd.DataFrame] = None,
+    strategy: Optional[StrategyModel] = None,
 ) -> Dict[str, object]:
     k = max(int(k), 2)
     total = len(df)
+    runner = _resolve_strategy(strategy)
     if total == 0 or k <= 1:
         return {"folds": [], "mean": 0.0, "median": 0.0, "count": 0}
 
@@ -140,8 +154,11 @@ def run_purged_kfold(
         train_htf = htf_df if htf_df is None else htf_df.loc[train_df.index]
         test_htf = htf_df if htf_df is None else htf_df.loc[test_df.index]
 
-        train_metrics = run_backtest(train_df, params, fees, risk, htf_df=train_htf)
-        test_metrics = run_backtest(test_df, params, fees, risk, htf_df=test_htf)
+        train_df_prepared, train_htf_prepared = runner.prepare_data(train_df, train_htf, params)
+        test_df_prepared, test_htf_prepared = runner.prepare_data(test_df, test_htf, params)
+
+        train_metrics = runner.run_backtest(train_df_prepared, params, fees, risk, htf_df=train_htf_prepared)
+        test_metrics = runner.run_backtest(test_df_prepared, params, fees, risk, htf_df=test_htf_prepared)
 
         folds.append(
             {

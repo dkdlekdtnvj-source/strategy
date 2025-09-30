@@ -162,3 +162,14 @@ def test_score_metrics_applies_penalties():
     }
     score = score_metrics(metrics, ["NetProfit"])
     assert score < 0.5
+
+
+def test_score_metrics_minimize_handles_negative_values():
+    smaller_drawdown = {"MaxDD": -0.08}
+    larger_drawdown = {"MaxDD": -0.2}
+    objectives = [{"name": "MaxDD", "direction": "minimize"}]
+
+    score_small = score_metrics(smaller_drawdown, objectives)
+    score_large = score_metrics(larger_drawdown, objectives)
+
+    assert score_small > score_large

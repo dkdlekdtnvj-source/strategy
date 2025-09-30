@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import optuna
 
@@ -138,10 +138,57 @@ def _validate_candidate(candidate: Dict[str, object], space: SpaceSpec) -> Optio
     return validated
 
 
+def _normalise_direction(text: Optional[str]) -> str:
+    if not text:
+        return "maximize"
+    lowered = str(text).lower()
+    if lowered in {"min", "minimise", "minimize"}:
+        return "minimize"
+    if lowered in {"max", "maximise", "maximize"}:
+        return "maximize"
+    return "maximize"
+
+
+def _objective_score(values: Sequence[object], specs: Sequence[Dict[str, object]]) -> float:
+    score = 0.0
+    used = False
+    for idx, raw in enumerate(values):
+        try:
+            value = float(raw)
+        except Exception:
+            continue
+        direction = "maximize"
+        weight = 1.0
+        if idx < len(specs):
+            spec = specs[idx]
+            direction = _normalise_direction(spec.get("direction"))
+            try:
+                weight = float(spec.get("weight", 1.0))
+            except Exception:
+                weight = 1.0
+        if direction == "minimize":
+            value = -abs(value)
+        score += weight * value
+        used = True
+    return score if used else float("-inf")
+
+
+def _trial_score(trial: optuna.trial.FrozenTrial, specs: Sequence[Dict[str, object]]) -> float:
+    if trial.value is not None:
+        try:
+            return float(trial.value)
+        except Exception:
+            return float("-inf")
+    if trial.values:
+        return _objective_score(trial.values, specs)
+    return float("-inf")
+
+
 def generate_llm_candidates(
     space: SpaceSpec,
     trials: Iterable[optuna.trial.FrozenTrial],
     config: Dict[str, object],
+    objectives: Optional[Sequence[Dict[str, object]]] = None,
 ) -> List[Dict[str, object]]:
     if not config or not config.get("enabled"):
         return []
@@ -154,10 +201,16 @@ def generate_llm_candidates(
         LOGGER.warning("Gemini API 키가 설정되지 않아 LLM 제안을 건너뜁니다.")
         return []
 
+    objective_specs: Sequence[Dict[str, object]] = list(objectives or [])
+
     finished_trials: List[optuna.trial.FrozenTrial] = [
         trial
         for trial in trials
-        if trial.value is not None and trial.state.is_finished()
+        if trial.state.is_finished()
+        and (
+            trial.value is not None
+            or (trial.values is not None and len(trial.values) > 0)
+        )
     ]
     if not finished_trials:
         LOGGER.info("아직 완료된 트라이얼이 없어 LLM 제안을 생략합니다.")
@@ -165,16 +218,42 @@ def generate_llm_candidates(
 
     top_n = max(int(config.get("top_n", 10)), 1)
     count = max(int(config.get("count", 8)), 1)
-    sorted_trials = sorted(
-        finished_trials,
-        key=lambda trial: float(trial.value) if trial.value is not None else float("-inf"),
-        reverse=True,
-    )
+    scored_trials = [
+        (max(_trial_score(trial, objective_specs), float("-inf")), trial)
+        for trial in finished_trials
+    ]
+    sorted_trials = [
+        trial for _, trial in sorted(scored_trials, key=lambda item: item[0], reverse=True)
+    ]
+
+    objective_overview: List[Dict[str, object]] = []
+    for spec in objective_specs:
+        overview = {
+            "name": spec.get("name"),
+            "direction": _normalise_direction(spec.get("direction")),
+        }
+        weight = spec.get("weight")
+        if weight is not None:
+            try:
+                overview["weight"] = float(weight)
+            except Exception:
+                pass
+        objective_overview.append(overview)
+
     top_trials = [
         {
             "number": trial.number,
+            "score": _trial_score(trial, objective_specs),
             "value": float(trial.value) if trial.value is not None else None,
+            "values": [float(v) if v is not None else None for v in (trial.values or [])]
+            if trial.values
+            else None,
             "params": trial.params,
+            "metrics": {
+                key: trial.user_attrs[key]
+                for key in ("ProfitFactor", "Sortino", "MaxDD", "NetProfit")
+                if key in trial.user_attrs
+            },
         }
         for trial in sorted_trials[:top_n]
     ]
@@ -185,6 +264,14 @@ def generate_llm_candidates(
         "You are assisting with hyper-parameter optimisation for a trading strategy.\n"
         "The search space is defined by the following JSON (types: int, float, bool, choice):\n"
         f"{json.dumps(space, indent=2)}\n\n"
+    )
+    if objective_overview:
+        prompt += (
+            "The optimisation currently tracks the following objectives (higher score after"
+            " direction normalisation is better):\n"
+            f"{json.dumps(objective_overview, indent=2)}\n\n"
+        )
+    prompt += (
         "Here are the top completed trials with their objective values (higher is better):\n"
         f"{json.dumps(top_trials, indent=2)}\n\n"
         f"Propose {count} new parameter sets strictly within the given bounds."

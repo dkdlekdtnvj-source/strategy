@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -145,30 +145,47 @@ def aggregate_metrics(trades: List[Trade], returns: pd.Series) -> Dict[str, floa
     return metrics
 
 
-def _objective_iterator(objectives: Iterable[object]) -> Iterable[Tuple[str, float]]:
+def _normalise_direction(name: str, direction: Optional[str]) -> str:
+    if direction:
+        text = str(direction).lower()
+        if text in {"maximize", "max", "maximise"}:
+            return "maximize"
+        if text in {"minimize", "min", "minimise"}:
+            return "minimize"
+    if name.lower() in {"maxdd", "maxdrawdown"}:
+        return "minimize"
+    return "maximize"
+
+
+def _objective_iterator(
+    objectives: Iterable[object],
+) -> Iterable[Tuple[str, float, str]]:
     for obj in objectives:
         if isinstance(obj, str):
-            yield obj, 1.0
+            name = obj
+            weight = 1.0
+            direction = _normalise_direction(name, None)
+            yield name, weight, direction
         elif isinstance(obj, dict):
             name = obj.get("name") or obj.get("metric")
             if not name:
                 continue
             weight = float(obj.get("weight", 1.0))
-            yield str(name), weight
+            direction = _normalise_direction(name, obj.get("direction") or obj.get("goal"))
+            yield str(name), weight, direction
 
 
 def score_metrics(metrics: Dict[str, float], objectives: Iterable[object]) -> float:
     """Score a metric dictionary according to weighted objectives and penalties."""
 
     score = 0.0
-    for name, weight in _objective_iterator(objectives):
+    for name, weight, direction in _objective_iterator(objectives):
         value = metrics.get(name)
         if value is None:
             continue
-        if name.lower() in {"maxdd", "maxdrawdown"}:
-            contribution = -abs(float(value))
-        else:
-            contribution = float(value)
+        contribution = float(value)
+        if direction == "minimize":
+            contribution = -abs(contribution)
         score += weight * contribution
 
     trades = float(metrics.get("Trades", 0))
