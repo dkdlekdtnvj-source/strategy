@@ -138,6 +138,17 @@ def _validate_candidate(candidate: Dict[str, object], space: SpaceSpec) -> Optio
     return validated
 
 
+def _trial_values(trial: optuna.trial.FrozenTrial) -> List[Optional[float]]:
+    values = getattr(trial, "values", None)
+    if isinstance(values, (tuple, list)):
+        return list(values)
+    try:  # pragma: no cover - defensive against unexpected optuna versions
+        value = trial.value
+    except Exception:
+        value = None
+    return [value] if value is not None else []
+
+
 def generate_llm_candidates(
     space: SpaceSpec,
     trials: Iterable[optuna.trial.FrozenTrial],
@@ -154,30 +165,60 @@ def generate_llm_candidates(
         LOGGER.warning("Gemini API 키가 설정되지 않아 LLM 제안을 건너뜁니다.")
         return []
 
-    finished_trials: List[optuna.trial.FrozenTrial] = [
-        trial
-        for trial in trials
-        if trial.value is not None and trial.state.is_finished()
-    ]
+    finished_trials: List[optuna.trial.FrozenTrial] = []
+    for trial in trials:
+        if not trial.state.is_finished():
+            continue
+        values = _trial_values(trial)
+        if not values or any(value is None for value in values):
+            continue
+        finished_trials.append(trial)
     if not finished_trials:
         LOGGER.info("아직 완료된 트라이얼이 없어 LLM 제안을 생략합니다.")
         return []
 
     top_n = max(int(config.get("top_n", 10)), 1)
     count = max(int(config.get("count", 8)), 1)
+    objective_index = max(int(config.get("objective_index", 0)), 0)
+    direction = str(config.get("objective_direction", "maximize")).strip().lower()
+    reverse = direction not in {"minimize", "min"}
+
+    def _primary_value(trial: optuna.trial.FrozenTrial) -> float:
+        values = _trial_values(trial)
+        if not values:
+            return float("-inf")
+        index = min(objective_index, len(values) - 1)
+        value = values[index]
+        if value is None:
+            return float("-inf")
+        try:
+            return float(value)
+        except Exception:
+            return float("-inf")
+
     sorted_trials = sorted(
         finished_trials,
-        key=lambda trial: float(trial.value) if trial.value is not None else float("-inf"),
-        reverse=True,
+        key=_primary_value,
+        reverse=reverse,
     )
-    top_trials = [
-        {
+
+    direction_phrase = "higher is better" if reverse else "lower is better"
+
+    top_trials = []
+    for trial in sorted_trials[:top_n]:
+        values = _trial_values(trial)
+        entry: Dict[str, object] = {
             "number": trial.number,
-            "value": float(trial.value) if trial.value is not None else None,
             "params": trial.params,
         }
-        for trial in sorted_trials[:top_n]
-    ]
+        if len(values) > 1:
+            entry["values"] = [
+                float(value) if value is not None else None for value in values
+            ]
+        elif values:
+            value = values[0]
+            entry["value"] = float(value) if value is not None else None
+        top_trials.append(entry)
 
     client = genai.Client(api_key=api_key)
     model = str(config.get("model", "gemini-2.0-flash-exp"))
@@ -185,7 +226,7 @@ def generate_llm_candidates(
         "You are assisting with hyper-parameter optimisation for a trading strategy.\n"
         "The search space is defined by the following JSON (types: int, float, bool, choice):\n"
         f"{json.dumps(space, indent=2)}\n\n"
-        "Here are the top completed trials with their objective values (higher is better):\n"
+        f"Here are the top completed trials with their objective values ({direction_phrase}):\n"
         f"{json.dumps(top_trials, indent=2)}\n\n"
         f"Propose {count} new parameter sets strictly within the given bounds."
         " Return only a JSON array of objects with keys matching the parameter names."
