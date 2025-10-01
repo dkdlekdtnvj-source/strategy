@@ -1,3 +1,5 @@
+import math
+
 import pandas as pd
 import pytest
 
@@ -56,6 +58,43 @@ def test_aggregate_metrics_basic():
     assert metrics["ProfitFactor"] > 0
     assert "WeeklyNetProfit" in metrics
     assert "Expectancy" in metrics
+
+
+def test_aggregate_metrics_no_losses_is_finite():
+    trades = [
+        Trade(
+            pd.Timestamp("2023-01-01"),
+            pd.Timestamp("2023-01-02"),
+            "long",
+            1.0,
+            100,
+            102,
+            0.02,
+            0.02,
+            0.03,
+            -0.01,
+            3,
+        ),
+        Trade(
+            pd.Timestamp("2023-01-03"),
+            pd.Timestamp("2023-01-04"),
+            "short",
+            1.0,
+            105,
+            103,
+            0.02,
+            0.02,
+            0.02,
+            -0.01,
+            4,
+        ),
+    ]
+    returns = pd.Series([0.01, 0.015, 0.02], index=pd.date_range("2023-01-01", periods=3, freq="D"))
+    metrics = aggregate_metrics(trades, returns)
+
+    assert math.isfinite(metrics["ProfitFactor"])
+    assert math.isfinite(metrics["Sortino"])
+    assert math.isfinite(metrics["Sharpe"])
 
 
 def test_run_backtest_deterministic():
