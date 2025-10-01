@@ -2491,14 +2491,18 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
     params_cfg = load_yaml(args.params)
     backtest_cfg = load_yaml(args.backtest)
 
-    auto_list = fetch_top_usdt_perp_symbols(
-        limit=50,
-        exclude_symbols=["BUSDUSDT", "USDCUSDT"],
-        exclude_keywords=["UP", "DOWN", "BULL", "BEAR", "2L", "2S", "3L", "3S", "5L", "5S"],
-        min_price=0.002,
-    )
+    auto_list: List[str] = []
+
+    def _load_top_list() -> List[str]:
+        return fetch_top_usdt_perp_symbols(
+            limit=50,
+            exclude_symbols=["BUSDUSDT", "USDCUSDT"],
+            exclude_keywords=["UP", "DOWN", "BULL", "BEAR", "2L", "2S", "3L", "3S", "5L", "5S"],
+            min_price=0.002,
+        )
 
     if args.list_top50:
+        auto_list = _load_top_list()
         import csv
 
         reports_dir = Path("reports")
@@ -2520,8 +2524,13 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
     selected_symbol = ""
     if args.pick_symbol:
         selected_symbol = args.pick_symbol.strip()
-    elif args.pick_top50 and 1 <= args.pick_top50 <= len(auto_list):
-        selected_symbol = auto_list[args.pick_top50 - 1]
+    elif args.pick_top50:
+        auto_list = auto_list or _load_top_list()
+        if 1 <= args.pick_top50 <= len(auto_list):
+            selected_symbol = auto_list[args.pick_top50 - 1]
+        else:
+            print("\n[ERROR] --pick-top50 인덱스가 범위를 벗어났습니다 (1~50).")
+            return
     else:
         print("\n[ERROR] 심볼이 지정되지 않았습니다.")
         print("   예) 상위50 출력:       python -m optimize.run --list-top50")
