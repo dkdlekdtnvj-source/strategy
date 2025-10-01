@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 from collections.abc import Sequence as AbcSequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -22,6 +23,7 @@ import optuna.storages
 import pandas as pd
 import yaml
 import multiprocessing
+import ccxt
 
 from datafeed.cache import DataCache
 from optimize.metrics import (
@@ -1740,6 +1742,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, help="Custom output directory (defaults to timestamped folder)")
     parser.add_argument("--data", type=Path, default=Path("data"))
     parser.add_argument("--symbol", type=str, help="Override symbol to optimise")
+    parser.add_argument(
+        "--list-top50",
+        action="store_true",
+        help="USDT-Perp 24h 거래대금 상위 50개 심볼을 번호와 함께 출력 후 종료",
+    )
+    parser.add_argument(
+        "--pick-top50",
+        type=int,
+        default=0,
+        help="USDT-Perp 상위 50 리스트에서 번호로 선택(1~50). 선택된 심볼만 백테스트",
+    )
+    parser.add_argument(
+        "--pick-symbol",
+        type=str,
+        default="",
+        help="직접 심볼 지정 (예: BINANCE:ETHUSDT). 지정 시 top50 무시",
+    )
     parser.add_argument("--timeframe", type=str, help="Override lower timeframe")
     parser.add_argument("--htf", type=str, help="Override higher timeframe for confirmations")
     parser.add_argument(
@@ -2420,6 +2439,59 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
     params_cfg = load_yaml(args.params)
     backtest_cfg = load_yaml(args.backtest)
 
+    auto_list = fetch_top_usdt_perp_symbols(
+        limit=50,
+        exclude_symbols=["BUSDUSDT", "USDCUSDT"],
+        exclude_keywords=["UP", "DOWN", "BULL", "BEAR", "2L", "2S", "3L", "3S", "5L", "5S"],
+        min_price=0.002,
+    )
+
+    if args.list_top50:
+        import csv
+
+        reports_dir = Path("reports")
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = reports_dir / "top50_usdt_perp.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["rank", "symbol"])
+            for index, symbol in enumerate(auto_list, start=1):
+                writer.writerow([index, symbol])
+        print("Saved: reports/top50_usdt_perp.csv")
+        print("\n== USDT-Perp 24h 거래대금 상위 50 ==")
+        for index, symbol in enumerate(auto_list, start=1):
+            print(f"{index:2d}. {symbol}")
+        print(
+            "\n원하는 번호를 --pick-top50 N 으로 실행하거나, --pick-symbol BINANCE:SYMBOL 로 직접 지정하세요."
+        )
+        return
+
+    selected_symbol = ""
+    if args.pick_symbol:
+        selected_symbol = args.pick_symbol.strip()
+    elif args.pick_top50 and 1 <= args.pick_top50 <= len(auto_list):
+        selected_symbol = auto_list[args.pick_top50 - 1]
+    elif args.symbol:
+        selected_symbol = args.symbol.strip()
+    else:
+        print("\n[ERROR] 심볼이 지정되지 않았습니다.")
+        print("   예) 상위50 출력:       python -m optimize.run --list-top50")
+        print("       7번 선택(예):      python -m optimize.run --pick-top50 7")
+        print("       직접 지정:         python -m optimize.run --pick-symbol BINANCE:ETHUSDT")
+        return
+
+    print(f"[INFO] 선택된 심볼: {selected_symbol}")
+
+    args.symbol = selected_symbol
+    params_cfg["symbol"] = selected_symbol
+    backtest_cfg["symbols"] = [selected_symbol]
+
+    datasets = backtest_cfg.get("datasets")
+    if isinstance(datasets, list):
+        for dataset in datasets:
+            if isinstance(dataset, dict):
+                dataset["symbol"] = selected_symbol
+
     combos = _parse_timeframe_grid(getattr(args, "timeframe_grid", None))
     if not combos:
         _execute_single(args, params_cfg, backtest_cfg, argv)
@@ -2493,3 +2565,63 @@ if __name__ == "__main__":
 
     mp.freeze_support()
     main()
+
+
+def fetch_top_usdt_perp_symbols(
+    limit: int = 50,
+    exclude_symbols: Optional[Sequence[str]] = None,
+    exclude_keywords: Optional[Sequence[str]] = None,
+    min_price: Optional[float] = None,
+) -> List[str]:
+    """BINANCE USDT 무기한 선물 거래대금 상위 심볼을 반환합니다."""
+
+    ex = ccxt.binanceusdm(
+        {
+            "options": {"defaultType": "future"},
+            "enableRateLimit": True,
+        }
+    )
+    ex.load_markets()
+    tickers = ex.fetch_tickers()
+
+    exclude_symbols_set = set(exclude_symbols or [])
+    exclude_keywords = list(exclude_keywords or [])
+    keyword_pattern = (
+        re.compile("|".join(re.escape(k) for k in exclude_keywords))
+        if exclude_keywords
+        else None
+    )
+
+    rows: List[Tuple[str, float]] = []
+    for sym, ticker in tickers.items():
+        market = ex.market(sym)
+        if not market.get("swap", False):
+            continue
+        if market.get("quote") != "USDT":
+            continue
+
+        unified = market.get("id", "")
+        if unified in exclude_symbols_set:
+            continue
+        if keyword_pattern and keyword_pattern.search(unified):
+            continue
+
+        last = ticker.get("last")
+        if min_price is not None:
+            if last is None or float(last) < float(min_price):
+                continue
+
+        quote_volume = ticker.get("quoteVolume")
+        if quote_volume is None:
+            base_volume = ticker.get("baseVolume") or 0
+            last_price = ticker.get("last") or 0
+            quote_volume = base_volume * last_price
+
+        try:
+            rows.append((unified, float(quote_volume)))
+        except (TypeError, ValueError):
+            continue
+
+    rows.sort(key=lambda item: item[1], reverse=True)
+    return [f"BINANCE:{symbol}" for symbol, _ in rows[:limit]]
+
