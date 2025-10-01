@@ -387,6 +387,24 @@ def _prompt_bool(label: str, default: Optional[bool] = None) -> Optional[bool]:
         print("Please answer 'y' or 'n'.")
 
 
+def _coerce_bool_or_none(value: object) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "nan"}:
+            return None
+        if text in {"true", "t", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "f", "0", "no", "n", "off"}:
+            return False
+    return None
+
+
 def _collect_tokens(items: Iterable[str]) -> List[str]:
     tokens: List[str] = []
     for item in items:
@@ -1279,12 +1297,47 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end", type=str, help="Override backtest end date (ISO8601)")
     parser.add_argument("--leverage", type=float, help="Override leverage setting")
     parser.add_argument("--qty-pct", type=float, help="Override quantity percent")
+    parser.add_argument(
+        "--simple-metrics",
+        action="store_true",
+        help="단순 ProfitFactor 경로만 계산하도록 강제합니다",
+    )
+    parser.add_argument(
+        "--simple-profit",
+        action="store_true",
+        help="--simple-metrics 와 동일하게 ProfitFactor 전용 지표 경로를 사용합니다",
+    )
+    parser.add_argument(
+        "--no-simple-metrics",
+        action="store_true",
+        help="단순 ProfitFactor 경로 강제 설정을 비활성화합니다",
+    )
     parser.add_argument("--interactive", action="store_true", help="Prompt for dataset and toggle selections")
     parser.add_argument("--enable", action="append", default=[], help="Force-enable boolean parameters (comma separated)")
     parser.add_argument("--disable", action="append", default=[], help="Force-disable boolean parameters (comma separated)")
     parser.add_argument("--top-k", type=int, default=0, help="Re-rank top-K trials by walk-forward OOS mean")
     parser.add_argument("--n-trials", type=int, help="Override Optuna trial count")
     parser.add_argument("--n-jobs", type=int, help="Optuna 병렬 worker 수 (기본 1)")
+    parser.add_argument(
+        "--dataset-jobs",
+        type=int,
+        help="단일 실험 내 데이터셋 병렬 백테스트 worker 수를 지정합니다",
+    )
+    parser.add_argument(
+        "--dataset-executor",
+        choices=["thread", "process"],
+        help="데이터셋 병렬 백테스트 실행기를 지정합니다",
+    )
+    parser.add_argument(
+        "--dataset-start-method",
+        type=str,
+        help="Process executor 사용 시 multiprocessing start method 를 지정합니다",
+    )
+    parser.add_argument(
+        "--auto-workers",
+        action="store_true",
+        help="가용 CPU 기반으로 Optuna worker 와 데이터셋 병렬 구성을 자동 조정합니다",
+    )
     parser.add_argument("--study-name", type=str, help="Override Optuna study name")
     parser.add_argument(
         "--study-template",
@@ -1366,6 +1419,25 @@ def _execute_single(
             LOGGER.warning("--n-jobs 값 '%s' 이 올바르지 않아 1로 설정합니다.", args.n_jobs)
             search_cfg["n_jobs"] = 1
 
+    if args.dataset_jobs is not None:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        try:
+            search_cfg["dataset_jobs"] = max(1, int(args.dataset_jobs))
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "--dataset-jobs 값 '%s' 이 올바르지 않아 1로 설정합니다.",
+                args.dataset_jobs,
+            )
+            search_cfg["dataset_jobs"] = 1
+
+    if args.dataset_executor:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        search_cfg["dataset_executor"] = args.dataset_executor
+
+    if args.dataset_start_method:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        search_cfg["dataset_start_method"] = args.dataset_start_method
+
     if args.study_name:
         search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["study_name"] = args.study_name
@@ -1383,6 +1455,7 @@ def _execute_single(
         search_cfg["pruner"] = args.pruner
 
     forced_params: Dict[str, object] = dict(params_cfg.get("overrides", {}))
+    auto_workers = bool(getattr(args, "auto_workers", False))
     for name in _collect_tokens(args.enable):
         forced_params[name] = True
     for name in _collect_tokens(args.disable):
@@ -1456,6 +1529,19 @@ def _execute_single(
         risk_cfg["qty_pct"] = args.qty_pct
         backtest_risk["qty_pct"] = args.qty_pct
 
+    def _apply_simple_metrics(decision: bool) -> None:
+        forced_params["simpleMetricsOnly"] = decision
+        forced_params["simpleProfitOnly"] = decision
+        risk_cfg["simpleMetricsOnly"] = decision
+        risk_cfg["simpleProfitOnly"] = decision
+        backtest_risk["simpleMetricsOnly"] = decision
+        backtest_risk["simpleProfitOnly"] = decision
+
+    if getattr(args, "simple_metrics", False) or getattr(args, "simple_profit", False):
+        _apply_simple_metrics(True)
+    elif getattr(args, "no_simple_metrics", False):
+        _apply_simple_metrics(False)
+
     if args.interactive:
         leverage_default = risk_cfg.get("leverage")
         qty_default = risk_cfg.get("qty_pct")
@@ -1483,9 +1569,59 @@ def _execute_single(
             if decision is not None:
                 forced_params[name] = decision
 
+        simple_default: Optional[bool] = None
+        for candidate in (
+            forced_params.get("simpleMetricsOnly"),
+            forced_params.get("simpleProfitOnly"),
+            risk_cfg.get("simpleMetricsOnly"),
+            risk_cfg.get("simpleProfitOnly"),
+            backtest_risk.get("simpleMetricsOnly"),
+            backtest_risk.get("simpleProfitOnly"),
+        ):
+            coerced = _coerce_bool_or_none(candidate)
+            if coerced is not None:
+                simple_default = coerced
+                break
+        decision = _prompt_bool(
+            "단순 ProfitFactor 전용 지표 경로 사용", simple_default
+        )
+        if decision is not None:
+            _apply_simple_metrics(decision)
+
+    params_cfg["overrides"] = forced_params
+
     datasets = prepare_datasets(params_cfg, backtest_cfg, args.data)
     if not datasets:
         raise RuntimeError("No datasets prepared for optimisation")
+
+    if auto_workers:
+        available_cpu = max(multiprocessing.cpu_count(), 1)
+        search_cfg = _ensure_dict(params_cfg, "search")
+        current_n_jobs = int(search_cfg.get("n_jobs", 1) or 1)
+        if current_n_jobs <= 1 and available_cpu > 1:
+            recommended_trials = min(available_cpu, max(2, available_cpu // 2))
+            if recommended_trials > 1:
+                search_cfg["n_jobs"] = recommended_trials
+                LOGGER.info(
+                    "Auto workers: Optuna n_jobs=%d (available CPU=%d)",
+                    recommended_trials,
+                    available_cpu,
+                )
+        dataset_jobs_current = int(search_cfg.get("dataset_jobs", 1) or 1)
+        if len(datasets) > 1 and available_cpu > current_n_jobs and dataset_jobs_current <= 1:
+            max_parallel = max(
+                1,
+                min(len(datasets), max(1, available_cpu // max(1, search_cfg.get("n_jobs", 1)))),
+            )
+            if max_parallel > 1:
+                search_cfg["dataset_jobs"] = max_parallel
+                LOGGER.info(
+                    "Auto workers: dataset_jobs=%d (datasets=%d, CPU=%d)",
+                    max_parallel,
+                    len(datasets),
+                    available_cpu,
+                )
+
 
     output_dir, tag_info = _resolve_output_directory(args.output, datasets, params_cfg, args.run_tag)
     _configure_logging(output_dir / "logs")
