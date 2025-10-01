@@ -2,14 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 
 from . import filters, indicators, metrics
 from .exits import ExitCalculator
 from .schema import StrategyParams
+from .utils import KST
 
 
 @dataclass
@@ -133,7 +133,7 @@ class StrategyEngine:
             "filters": filter_context,
         }
 
-    def run(self, df: pd.DataFrame, indicators_map: Dict[str, any]) -> BacktestResult:
+    def run(self, df: pd.DataFrame, indicators_map: Dict[str, Any]) -> BacktestResult:
         ut = indicators_map["ut"]
         stoch_long = indicators_map["stoch_long"]
         stoch_short = indicators_map["stoch_short"]
@@ -150,58 +150,145 @@ class StrategyEngine:
         entry_price = 0.0
         trades: List[Trade] = []
         equity = self.initial_capital
-        equity_curve = []
-        qty = 1.0
+        equity_curve: List[float] = []
+        position_qty = 0.0
+        initial_qty = 0.0
+        total_entry_fee = 0.0
+        remaining_entry_fee = 0.0
         armed_long = False
         armed_short = False
         trade_bars = 0
         entry_time: Optional[pd.Timestamp] = None
+        tp1_hit = False
+        breakeven_price: Optional[float] = None
+        cooldown = 0
+        daily_trades: Dict[str, int] = {}
         exit_cache = self.exit_calc.prepare(df)
         log_rows = []
 
         for ts, row in df.iterrows():
-            price = row["close"]
+            price = float(row["close"])
             bar_fee = 0.0
-            reason = ""
+            events: List[str] = []
             action = "hold"
 
-            long_ready = signals_long.loc[ts]
-            short_ready = signals_short.loc[ts]
+            long_ready = bool(signals_long.loc[ts])
+            short_ready = bool(signals_short.loc[ts])
+
+            allow_entry = cooldown == 0
+            if cooldown > 0:
+                cooldown -= 1
+
+            day_key = self._day_key(ts)
+            if self.params.risk.maxTradesPerDay > 0:
+                if daily_trades.get(day_key, 0) >= self.params.risk.maxTradesPerDay:
+                    allow_entry = False
+
+            if not allow_entry:
+                long_ready = False
+                short_ready = False
 
             if position == 0:
                 if self.params.ut.ibs:
                     if long_ready and not armed_long:
                         position = 1
                         entry_price = price + self.slippage
+                        position_qty = 1.0
+                        initial_qty = position_qty
+                        total_entry_fee = abs(entry_price) * self.fee * position_qty
+                        remaining_entry_fee = total_entry_fee
                         entry_time = ts
                         trade_bars = 0
+                        tp1_hit = False
+                        breakeven_price = None
                         armed_long = True
+                        daily_trades[day_key] = daily_trades.get(day_key, 0) + 1
                         action = "enter_long"
                     elif short_ready and not armed_short:
                         position = -1
                         entry_price = price - self.slippage
+                        position_qty = 1.0
+                        initial_qty = position_qty
+                        total_entry_fee = abs(entry_price) * self.fee * position_qty
+                        remaining_entry_fee = total_entry_fee
                         entry_time = ts
                         trade_bars = 0
+                        tp1_hit = False
+                        breakeven_price = None
                         armed_short = True
+                        daily_trades[day_key] = daily_trades.get(day_key, 0) + 1
                         action = "enter_short"
                 else:
                     if long_ready:
                         position = 1
                         entry_price = price + self.slippage
+                        position_qty = 1.0
+                        initial_qty = position_qty
+                        total_entry_fee = abs(entry_price) * self.fee * position_qty
+                        remaining_entry_fee = total_entry_fee
                         entry_time = ts
                         trade_bars = 0
+                        tp1_hit = False
+                        breakeven_price = None
+                        daily_trades[day_key] = daily_trades.get(day_key, 0) + 1
                         action = "enter_long"
                     elif short_ready:
                         position = -1
                         entry_price = price - self.slippage
+                        position_qty = 1.0
+                        initial_qty = position_qty
+                        total_entry_fee = abs(entry_price) * self.fee * position_qty
+                        remaining_entry_fee = total_entry_fee
                         entry_time = ts
                         trade_bars = 0
+                        tp1_hit = False
+                        breakeven_price = None
+                        daily_trades[day_key] = daily_trades.get(day_key, 0) + 1
                         action = "enter_short"
-
-                if position != 0:
-                    bar_fee = abs(entry_price) * self.fee * qty
             else:
                 trade_bars += 1
+
+            def execute_exit(exit_price: float, close_qty: float, reason_label: str) -> None:
+                nonlocal position, position_qty, remaining_entry_fee, equity, entry_price, trade_bars
+                nonlocal entry_time, tp1_hit, breakeven_price, total_entry_fee, initial_qty, cooldown, bar_fee
+                if close_qty <= 0:
+                    return
+                entry_fee_share = 0.0
+                if initial_qty > 0 and total_entry_fee > 0:
+                    entry_fee_share = total_entry_fee * (close_qty / initial_qty)
+                    entry_fee_share = min(entry_fee_share, remaining_entry_fee)
+                    remaining_entry_fee -= entry_fee_share
+                exit_fee = abs(exit_price) * self.fee * close_qty
+                gross = (exit_price - entry_price) * position * close_qty
+                net = gross - entry_fee_share - exit_fee
+                equity += net
+                bar_fee += entry_fee_share + exit_fee
+                trades.append(
+                    Trade(
+                        timestamp=ts,
+                        direction="long" if position > 0 else "short",
+                        entry_price=entry_price,
+                        exit_price=exit_price,
+                        qty=close_qty,
+                        pnl=net,
+                        fee=entry_fee_share + exit_fee,
+                        reason=reason_label,
+                    )
+                )
+                if net < 0:
+                    cooldown = max(cooldown, self.params.risk.lossCooldownBars)
+                position_qty -= close_qty
+                if position_qty <= 1e-9:
+                    position = 0
+                    position_qty = 0.0
+                    entry_price = 0.0
+                    trade_bars = 0
+                    entry_time = None
+                    tp1_hit = False
+                    breakeven_price = None
+                    total_entry_fee = 0.0
+                    remaining_entry_fee = 0.0
+                    initial_qty = 0.0
 
             if position != 0:
                 minutes = trade_bars * self._bar_minutes()
@@ -215,73 +302,134 @@ class StrategyEngine:
                     minutes,
                 )
 
-                exit_price = None
-                exit_reason = ""
-
                 if self.params.exits.utFlipExit:
-                    if position > 0 and ut.sell.loc[ts]:
-                        exit_price = price - self.slippage
-                        exit_reason = "ut_flip"
-                    elif position < 0 and ut.buy.loc[ts]:
-                        exit_price = price + self.slippage
-                        exit_reason = "ut_flip"
+                    if position > 0 and bool(ut.sell.loc[ts]):
+                        close_qty = position_qty
+                        if close_qty > 0:
+                            execute_exit(price - self.slippage, close_qty, "ut_flip")
+                            events.append("ut_flip")
+                            action = "exit_ut_flip"
+                    elif position < 0 and bool(ut.buy.loc[ts]):
+                        close_qty = position_qty
+                        if close_qty > 0:
+                            execute_exit(price + self.slippage, close_qty, "ut_flip")
+                            events.append("ut_flip")
+                            action = "exit_ut_flip"
 
-                if exit_levels.roi_hit and not exit_reason:
-                    exit_price = price
-                    exit_reason = "roi"
-                if exit_levels.max_bars_hit and not exit_reason:
-                    exit_price = price
-                    exit_reason = "time"
+                if position != 0 and exit_levels.roi_hit:
+                    close_qty = position_qty
+                    if close_qty > 0:
+                        execute_exit(price, close_qty, "roi")
+                        events.append("roi")
+                        action = "exit_roi"
 
-                if exit_price is None:
-                    if direction == "long":
-                        stop_level = exit_levels.stop
-                        if exit_levels.stop_percent:
-                            stop_level = max(stop_level, exit_levels.stop_percent)
-                        if price <= stop_level:
-                            exit_price = stop_level - self.slippage
-                            exit_reason = "stop"
-                        elif exit_levels.take_percent and price >= exit_levels.take_percent:
-                            exit_price = exit_levels.take_percent - self.slippage
-                            exit_reason = "take_pct"
+                if position != 0 and exit_levels.max_bars_hit:
+                    close_qty = position_qty
+                    if close_qty > 0:
+                        execute_exit(price, close_qty, "time")
+                        events.append("time")
+                        action = "exit_time"
+
+                if position != 0 and exit_levels.tp1 is not None and not tp1_hit:
+                    triggered = price >= exit_levels.tp1 if position > 0 else price <= exit_levels.tp1
+                    if triggered:
+                        tp1_hit = True
+                        pct = max(0.0, min(100.0, self.params.exits.tp1PctEff)) / 100.0
+                        if pct > 0 and position_qty > 0:
+                            close_qty = min(position_qty, position_qty * pct)
+                            fill = exit_levels.tp1 - self.slippage if position > 0 else exit_levels.tp1 + self.slippage
+                            execute_exit(fill, close_qty, "tp1_partial")
+                            events.append("tp1_partial")
+                            action = "partial_tp1"
+                        else:
+                            events.append("tp1_trigger")
+                        if position > 0:
+                            candidate_be = entry_price + self.params.exits.beOffsetEff * exit_levels.atr_value
+                            breakeven_price = max(breakeven_price or float("-inf"), candidate_be)
+                        else:
+                            candidate_be = entry_price - self.params.exits.beOffsetEff * exit_levels.atr_value
+                            breakeven_price = min(breakeven_price or float("inf"), candidate_be)
+
+                if position != 0 and tp1_hit:
+                    if position > 0:
+                        candidate_be = entry_price + self.params.exits.beOffsetEff * exit_levels.atr_value
+                        breakeven_price = max(breakeven_price or float("-inf"), candidate_be)
                     else:
-                        stop_level = exit_levels.stop
-                        if exit_levels.stop_percent:
-                            stop_level = min(stop_level, exit_levels.stop_percent)
-                        if price >= stop_level:
-                            exit_price = stop_level + self.slippage
-                            exit_reason = "stop"
-                        elif exit_levels.take_percent and price <= exit_levels.take_percent:
-                            exit_price = exit_levels.take_percent + self.slippage
-                            exit_reason = "take_pct"
+                        candidate_be = entry_price - self.params.exits.beOffsetEff * exit_levels.atr_value
+                        breakeven_price = min(breakeven_price or float("inf"), candidate_be)
 
-                if exit_price is not None:
-                    pnl = (exit_price - entry_price) * position * qty
-                    bar_fee += abs(exit_price) * self.fee * qty
-                    net = pnl - bar_fee
-                    equity += net
-                    trades.append(
-                        Trade(
-                            timestamp=ts,
-                            direction=direction,
-                            entry_price=entry_price,
-                            exit_price=exit_price,
-                            qty=qty,
-                            pnl=net,
-                            fee=bar_fee,
-                            reason=exit_reason,
-                        )
-                    )
-                    position = 0
-                    entry_price = 0.0
-                    trade_bars = 0
-                    entry_time = None
-                    action = f"exit_{exit_reason}"
-                    reason = exit_reason
+                if position != 0 and exit_levels.percent_take is not None:
+                    level = exit_levels.percent_take
+                    if position > 0 and price >= level:
+                        close_qty = position_qty
+                        if close_qty > 0:
+                            execute_exit(level - self.slippage, close_qty, "take_pct")
+                            events.append("take_pct")
+                            action = "exit_take_pct"
+                    elif position < 0 and price <= level:
+                        close_qty = position_qty
+                        if close_qty > 0:
+                            execute_exit(level + self.slippage, close_qty, "take_pct")
+                            events.append("take_pct")
+                            action = "exit_take_pct"
+
+                if position != 0 and exit_levels.tp2 is not None:
+                    if position > 0 and price >= exit_levels.tp2:
+                        close_qty = position_qty
+                        if close_qty > 0:
+                            execute_exit(exit_levels.tp2 - self.slippage, close_qty, "tp2")
+                            events.append("tp2")
+                            action = "exit_tp2"
+                    elif position < 0 and price <= exit_levels.tp2:
+                        close_qty = position_qty
+                        if close_qty > 0:
+                            execute_exit(exit_levels.tp2 + self.slippage, close_qty, "tp2")
+                            events.append("tp2")
+                            action = "exit_tp2"
+
+                if position != 0:
+                    if position > 0:
+                        candidates = [(exit_levels.stop, "stop")]
+                        if exit_levels.percent_stop is not None:
+                            candidates.append((exit_levels.percent_stop, "percent_stop"))
+                        if breakeven_price is not None:
+                            candidates.append((breakeven_price, "breakeven"))
+                        if tp1_hit and exit_levels.atr_trail is not None:
+                            candidates.append((exit_levels.atr_trail, "trail_atr"))
+                        if exit_levels.percent_trail is not None:
+                            candidates.append((exit_levels.percent_trail, "trail_pct"))
+                        effective_stop, stop_reason = max(candidates, key=lambda item: item[0])
+                        if price <= effective_stop:
+                            close_qty = position_qty
+                            if close_qty > 0:
+                                execute_exit(effective_stop - self.slippage, close_qty, stop_reason)
+                                events.append(stop_reason)
+                                action = f"exit_{stop_reason}"
+                    else:
+                        candidates = [(exit_levels.stop, "stop")]
+                        if exit_levels.percent_stop is not None:
+                            candidates.append((exit_levels.percent_stop, "percent_stop"))
+                        if breakeven_price is not None:
+                            candidates.append((breakeven_price, "breakeven"))
+                        if tp1_hit and exit_levels.atr_trail is not None:
+                            candidates.append((exit_levels.atr_trail, "trail_atr"))
+                        if exit_levels.percent_trail is not None:
+                            candidates.append((exit_levels.percent_trail, "trail_pct"))
+                        effective_stop, stop_reason = min(candidates, key=lambda item: item[0])
+                        if price >= effective_stop:
+                            close_qty = position_qty
+                            if close_qty > 0:
+                                execute_exit(effective_stop + self.slippage, close_qty, stop_reason)
+                                events.append(stop_reason)
+                                action = f"exit_{stop_reason}"
 
             if self.params.ut.ibs:
                 armed_long = long_ready
                 armed_short = short_ready
+
+            reason = ";".join(events)
+            if not reason and action.startswith("enter_"):
+                reason = action
 
             equity_curve.append(equity)
             log_rows.append(
@@ -307,6 +455,11 @@ class StrategyEngine:
     def _bar_minutes(self) -> float:
         mapping = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "1h": 60}
         return mapping.get(self.timeframe, 1)
+
+    def _day_key(self, ts: pd.Timestamp) -> str:
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        return ts.tz_convert(KST).strftime("%Y-%m-%d")
 
 
 __all__ = ["BacktestResult", "StrategyEngine", "Trade"]

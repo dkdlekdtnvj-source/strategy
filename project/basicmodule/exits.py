@@ -15,9 +15,11 @@ class ExitLevels:
     stop: float
     tp1: Optional[float]
     tp2: Optional[float]
-    stop_percent: Optional[float]
-    take_percent: Optional[float]
-    trail_percent: Optional[float]
+    percent_stop: Optional[float]
+    percent_take: Optional[float]
+    percent_trail: Optional[float]
+    atr_trail: Optional[float]
+    atr_value: float
     roi_hit: bool
     max_bars_hit: bool
 
@@ -45,51 +47,59 @@ class ExitCalculator:
         bars_in_trade: int,
         minutes_in_trade: float,
     ) -> ExitLevels:
-        atr_val = float(row["atr"])
+        atr_raw = row.get("atr", 0.0)
+        atr_val = float(atr_raw) if pd.notna(atr_raw) else 0.0
         swing_low = row.get("swing_low")
         swing_high = row.get("swing_high")
+        price = float(row.get("close", entry_price))
 
         if direction == "long":
             base_stop = entry_price - self.params.initKEff * atr_val
-            if self.params.useSwingSL and swing_low is not pd.NA:
+            if self.params.useSwingSL and pd.notna(swing_low):
                 base_stop = min(base_stop, float(swing_low))
             r_multiple = entry_price - base_stop
             tp1 = entry_price + self.params.tp1RR * r_multiple if r_multiple > 0 else None
             tp2 = entry_price + self.params.tp2RR * r_multiple if r_multiple > 0 else None
-            stop_percent = entry_price * (1 - self.params.stopPctEff / 100) if self.params.usePercentStops else None
-            take_percent = entry_price * (1 + self.params.takePctEff / 100) if self.params.usePercentStops else None
-            trail_percent = (
-                (row["close"] if "close" in row else entry_price)
-                * (1 - self.params.trailGapEff / 100)
-                if self.params.usePercentStops
-                else None
-            )
-            roi_hit = self._roi_check(minutes_in_trade, entry_price, row.get("close", entry_price), True)
+            if self.params.usePercentStops:
+                stop_percent = entry_price * (1 - self.params.stopPctEff / 100)
+                take_percent = entry_price * (1 + self.params.takePctEff / 100)
+                activate = entry_price * (1 + self.params.trailStartEff / 100)
+                percent_trail = price * (1 - self.params.trailGapEff / 100) if price >= activate else None
+            else:
+                stop_percent = None
+                take_percent = None
+                percent_trail = None
+            atr_trail = price - self.params.trailKEff * atr_val if self.params.trailKEff > 0 else None
+            roi_hit = self._roi_check(minutes_in_trade, entry_price, price, True)
         else:
             base_stop = entry_price + self.params.initKEff * atr_val
-            if self.params.useSwingSL and swing_high is not pd.NA:
+            if self.params.useSwingSL and pd.notna(swing_high):
                 base_stop = max(base_stop, float(swing_high))
             r_multiple = base_stop - entry_price
             tp1 = entry_price - self.params.tp1RR * r_multiple if r_multiple > 0 else None
             tp2 = entry_price - self.params.tp2RR * r_multiple if r_multiple > 0 else None
-            stop_percent = entry_price * (1 + self.params.stopPctEff / 100) if self.params.usePercentStops else None
-            take_percent = entry_price * (1 - self.params.takePctEff / 100) if self.params.usePercentStops else None
-            trail_percent = (
-                (row["close"] if "close" in row else entry_price)
-                * (1 + self.params.trailGapEff / 100)
-                if self.params.usePercentStops
-                else None
-            )
-            roi_hit = self._roi_check(minutes_in_trade, entry_price, row.get("close", entry_price), False)
+            if self.params.usePercentStops:
+                stop_percent = entry_price * (1 + self.params.stopPctEff / 100)
+                take_percent = entry_price * (1 - self.params.takePctEff / 100)
+                activate = entry_price * (1 - self.params.trailStartEff / 100)
+                percent_trail = price * (1 + self.params.trailGapEff / 100) if price <= activate else None
+            else:
+                stop_percent = None
+                take_percent = None
+                percent_trail = None
+            atr_trail = price + self.params.trailKEff * atr_val if self.params.trailKEff > 0 else None
+            roi_hit = self._roi_check(minutes_in_trade, entry_price, price, False)
 
         max_bars_hit = self.params.maxBarsHoldEff > 0 and bars_in_trade >= self.params.maxBarsHoldEff
         return ExitLevels(
             stop=base_stop,
             tp1=tp1,
             tp2=tp2,
-            stop_percent=stop_percent,
-            take_percent=take_percent,
-            trail_percent=trail_percent,
+            percent_stop=stop_percent,
+            percent_take=take_percent,
+            percent_trail=percent_trail,
+            atr_trail=atr_trail,
+            atr_value=atr_val,
             roi_hit=roi_hit,
             max_bars_hit=max_bars_hit,
         )
