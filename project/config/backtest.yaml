@@ -1,0 +1,27 @@
+start: "2024-01-01 00:00:00+09:00"
+end: "2025-10-01 23:59:59+09:00"
+timeframes: ["1m", "3m", "5m"]
+symbols: "top50"
+fee: 0.0005
+slippage_ticks: 1
+initial_capital: 10000
+params_space: "project/config/params_space.yaml"
+data_dir: "project/data"
+reports_dir: "project/reports"
+timeframes_settings:
+  stoch: "15m"
+  htf1: "15m"
+  htf2: "1h"
+  regime: "1h"
+optuna:
+  trials_per_combo: 10
+  n_jobs: 1
+  pruner: "median"
+  adapt_interval: 100
+  adapt_low_quantile: 0.1
+  adapt_high_quantile: 0.9
+  adapt_top_ratio: 0.1
+objective_weights: {pf: 0.6, sortino: 0.3, netprofit: 0.1}
+resume: true
+use_gemini: false
+seed: 42

@@ -1,0 +1,80 @@
+ut:
+  utKeyEff: {type: float, low: 1.2, high: 5.0}
+  utAtrEff: {type: int, low: 6, high: 20}
+  utHA: {type: categorical, choices: [false, true]}
+  noRP: {type: categorical, choices: [true]}
+  ibs: {type: categorical, choices: [false, true]}
+
+stoch:
+  rsiLen: {type: int, low: 6, high: 24}
+  stLen: {type: int, low: 6, high: 24}
+  kLen: {type: int, low: 1, high: 8}
+  dLen: {type: int, low: 1, high: 8}
+  osEff: {type: float, low: 10, high: 35}
+  obEff: {type: float, low: 65, high: 90}
+  stMode: {type: categorical, choices: ["Bounce", "Cross"]}
+
+filters:
+  useMA100: {type: categorical, choices: [false, true]}
+  maType: {type: categorical, choices: ["EMA", "SMA", "WMA"]}
+  useMicroTrend: {type: categorical, choices: [false, true]}
+  emaFastLenBase: {type: int, low: 8, high: 34}
+  emaSlowLenBase: {type: int, low: 34, high: 120}
+  bbLen: {type: int, low: 12, high: 30}
+  bbMult: {type: float, low: 1.0, high: 2.0}
+  kcLen: {type: int, low: 12, high: 30}
+  useMomConfirm: {type: categorical, choices: [false, true]}
+  useCHoCH: {type: categorical, choices: [false, true]}
+  pL: {type: int, low: 1, high: 4}
+  pR: {type: int, low: 2, high: 6}
+  useVolumeFilter: {type: categorical, choices: [false, true]}
+  volumeLookback: {type: int, low: 10, high: 80}
+  volumeMultiplier: {type: float, low: 1.0, high: 3.0}
+  useCandleFilter: {type: categorical, choices: [false, true]}
+  candleBodyRatio: {type: float, low: 40, high: 90}
+  useEWO: {type: categorical, choices: [false, true]}
+  ewoFast: {type: int, low: 8, high: 32}
+  ewoSlow: {type: int, low: 20, high: 80}
+  ewoSignal: {type: int, low: 5, high: 20}
+  useChop: {type: categorical, choices: [false, true]}
+  chopLen: {type: int, low: 10, high: 30}
+  chopMax: {type: float, low: 40, high: 65}
+  useVolatility: {type: categorical, choices: [false, true]}
+  minAtrPerc: {type: float, low: 0.5, high: 2.0}
+  maxAtrPerc: {type: float, low: 3.0, high: 12.0}
+  useVolumeBoost: {type: categorical, choices: [false, true]}
+  volLen: {type: int, low: 10, high: 60}
+  useStructure: {type: categorical, choices: [false, true]}
+  structureLen: {type: int, low: 10, high: 60}
+  useTrendBias: {type: categorical, choices: [false, true]}
+  trendLenBase: {type: int, low: 50, high: 300}
+  useConfBias: {type: categorical, choices: [false, true]}
+  confLenBase: {type: int, low: 20, high: 150}
+
+exits:
+  atrLen: {type: int, low: 10, high: 24}
+  initKEff: {type: float, low: 1.2, high: 2.8}
+  tp1RR: {type: float, low: 0.8, high: 1.4}
+  tp2RR: {type: float, low: 1.6, high: 3.0}
+  tp1PctEff: {type: float, low: 30, high: 70}
+  trailKEff: {type: float, low: 1.8, high: 3.5}
+  beOffsetEff: {type: float, low: 0.0, high: 0.3}
+  useSwingSL: {type: categorical, choices: [false, true]}
+  swN: {type: int, low: 3, high: 12}
+  usePercentStops: {type: categorical, choices: [false, true]}
+  stopPctEff: {type: float, low: 0.6, high: 2.5}
+  takePctEff: {type: float, low: 1.0, high: 4.0}
+  trailStartEff: {type: float, low: 0.5, high: 2.0}
+  trailGapEff: {type: float, low: 0.2, high: 0.8}
+  maxBarsHoldEff: {type: int, low: 0, high: 360}
+  utFlipExit: {type: categorical, choices: [false, true]}
+  roi1MinEff: {type: int, low: 10, high: 180}
+  roi1PctEff: {type: float, low: 1.0, high: 3.0}
+  roi2MinEff: {type: int, low: 30, high: 240}
+  roi2PctEff: {type: float, low: 1.0, high: 3.0}
+  roi3MinEff: {type: int, low: 60, high: 300}
+  roi3PctEff: {type: float, low: 0.8, high: 2.5}
+
+risk:
+  lossCooldownBars: {type: int, low: 0, high: 50}
+  maxTradesPerDay: {type: int, low: 0, high: 20}
