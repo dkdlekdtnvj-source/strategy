@@ -1,201 +1,45 @@
-symbol: "BINANCE:ENAUSDT"
-timeframe: "1m"
-htf_timeframes:
-  - "15m"
-  - "1h"
-backtest:
-  from: "2024-01-01"
-  to: "2025-09-25"
-fees:
-  commission_pct: 0.0005
-  slippage_ticks: 2
-risk:
-  leverage: 10
-  qty_pct: 30
-  liq_buffer_pct: 0.5
-  min_trades: 60
-  min_hold_bars: 1
-  max_consecutive_losses: 5
-  penalty_trade: 0.2
-  penalty_hold: 0.1
-  penalty_consecutive_loss: 0.5
-objectives:
-  - name: ProfitFactor
-    weight: 1.0
+version: 1
+
 search:
   algo: bayes
   n_trials: 150
   seed: 42
-  study_name: "pine_squeeze_default"
-  storage_url_env: "OPTUNA_STORAGE_URL"
   top_k: 5
-  pruner: asha
-  heartbeat_interval: 60
-  heartbeat_grace_period: 120
-  multi_objective: false
-  nsga_params:
-    population_size: 120
-    crossover_prob: 0.9
-walk_forward:
-  train_bars: 0
-  test_bars: 0
-  step: 0
-llm:
-  enabled: true
-  model: "gemini-2.0-flash-exp"
-  api_key: "${YOUR_GEMINI_API_KEY}"
-  api_key_env: "GEMINI_API_KEY"
-  top_n: 12
-  count: 8
-  initial_trials: 60
+  # 기본 병렬: run.py에서 자동 설정(n_jobs=자동)
+
+objective:
+  # === 기본룰: ProfitFactor 중심 ===
+  - name: ProfitFactor
+    weight: 1.0
+
+constraints:
+  min_trades_test: 12   # 테스트 구간에서 최소 거래 수 (없으면 강한 패널티)
+  max_dd_pct: 70        # MaxDD 70% 초과면 패널티
+
 space:
-  timeframe: {type: choice, values: ["1m"]}
-  htf: {type: choice, values: ["15m", "1h"]}
-  oscLen: {type: int, min: 8, max: 32, step: 1}
-  signalLen: {type: int, min: 2, max: 7, step: 1}
-  useSameLen: {type: bool}
-  bbLen: {type: int, min: 10, max: 40, step: 2}
-  kcLen: {type: int, min: 10, max: 40, step: 2}
-  bbMult: {type: float, min: 1.0, max: 2.5, step: 0.1}
-  kcMult: {type: float, min: 0.8, max: 2.0, step: 0.1}
-  fluxLen: {type: int, min: 8, max: 30, step: 1}
-  fluxSmoothLen: {type: int, min: 1, max: 10, step: 1}
-  useFluxHeikin: {type: bool}
-  useDynamicThresh: {type: bool}
-  useSymThreshold: {type: bool}
-  statThreshold: {type: float, min: 20.0, max: 60.0, step: 1.0}
-  buyThreshold: {type: float, min: 20.0, max: 60.0, step: 1.0}
-  sellThreshold: {type: float, min: 20.0, max: 60.0, step: 1.0}
-  dynLen: {type: int, min: 10, max: 60, step: 2}
-  dynMult: {type: float, min: 0.5, max: 2.0, step: 0.1}
-  requireMomentumCross: {type: bool}
-  useHTF: {type: bool}
-  htfEmaLen: {type: int, min: 10, max: 80, step: 5, requires: useHTF}
-  useEventFilter: {type: bool}
-  useSessionFilter: {type: bool}
-  sessionUtc: {type: choice, values: ["0000-2359", "0000-1200", "1200-2359"], requires: useSessionFilter}
-  useDayFilter: {type: bool}
-  monOk: {type: bool, requires: useDayFilter}
-  tueOk: {type: bool, requires: useDayFilter}
-  wedOk: {type: bool, requires: useDayFilter}
-  thuOk: {type: bool, requires: useDayFilter}
-  friOk: {type: bool, requires: useDayFilter}
-  satOk: {type: bool, requires: useDayFilter}
-  sunOk: {type: bool, requires: useDayFilter}
-  useStopLoss: {type: bool}
-  stopLookback: {type: int, min: 3, max: 12, step: 1, requires: useStopLoss}
-  useAtrTrail: {type: bool}
-  atrTrailLen: {type: int, min: 5, max: 50, step: 5, requires: useAtrTrail}
-  atrTrailMult: {type: float, min: 1.0, max: 4.0, step: 0.25, requires: useAtrTrail}
-  usePivotStop: {type: bool}
-  pivotLen: {type: int, min: 3, max: 12, step: 1, requires: usePivotStop}
-  useBreakevenStop: {type: bool}
-  breakevenMult: {type: float, min: 0.5, max: 3.0, step: 0.25, requires: useBreakevenStop}
-  useTimeStop: {type: bool}
-  maxHoldBars: {type: int, min: 5, max: 120, step: 5, requires: useTimeStop}
-  usePerfAdaptiveRisk: {type: bool}
-  parLookback: {type: int, min: 3, max: 12, step: 1, requires: usePerfAdaptiveRisk}
-  parMinTrades: {type: int, min: 2, max: 10, step: 1, requires: usePerfAdaptiveRisk}
-  parHotWinRate: {type: float, min: 55.0, max: 80.0, step: 1.0, requires: usePerfAdaptiveRisk}
-  parColdWinRate: {type: float, min: 25.0, max: 50.0, step: 1.0, requires: usePerfAdaptiveRisk}
-  parHotRiskMult: {type: float, min: 1.0, max: 1.8, step: 0.05, requires: usePerfAdaptiveRisk}
-  parColdRiskMult: {type: float, min: 0.2, max: 0.7, step: 0.05, requires: usePerfAdaptiveRisk}
-  parPauseOnCold: {type: bool, requires: usePerfAdaptiveRisk}
-  useDailyLossGuard: {type: bool}
-  dailyLossLimit: {type: float, min: 40.0, max: 200.0, step: 10.0, requires: useDailyLossGuard}
-  maxDailyLosses: {type: int, min: 0, max: 5, step: 1, requires: useDailyLossGuard}
-  useDailyProfitLock: {type: bool}
-  dailyProfitTarget: {type: float, min: 80.0, max: 300.0, step: 10.0, requires: useDailyProfitLock}
-  useWeeklyProfitLock: {type: bool}
-  weeklyProfitTarget: {type: float, min: 150.0, max: 600.0, step: 25.0, requires: useWeeklyProfitLock}
-  useLossStreakGuard: {type: bool}
-  maxConsecutiveLosses: {type: int, min: 2, max: 6, step: 1, requires: useLossStreakGuard}
-  useCapitalGuard: {type: bool}
-  capitalGuardPct: {type: float, min: 10.0, max: 35.0, step: 1.0, requires: useCapitalGuard}
-  maxWeeklyDD: {type: float, min: 0.0, max: 15.0, step: 0.5, requires: useCapitalGuard}
-  maxGuardFires: {type: int, min: 0, max: 5, step: 1, requires: useCapitalGuard}
-  useGuardExit: {type: bool}
-  maintenanceMarginPct: {type: float, min: 0.2, max: 1.0, step: 0.05, requires: useGuardExit}
-  preemptTicks: {type: int, min: 2, max: 12, step: 1, requires: useGuardExit}
-  useVolatilityGuard: {type: bool}
-  volatilityLookback: {type: int, min: 20, max: 80, step: 5, requires: useVolatilityGuard}
-  volatilityLowerPct: {type: float, min: 0.1, max: 0.5, step: 0.05, requires: useVolatilityGuard}
-  volatilityUpperPct: {type: float, min: 1.5, max: 3.0, step: 0.1, requires: useVolatilityGuard}
-  useAdx: {type: bool}
-  useAtrDiff: {type: bool}
-  adxLen: {type: int, min: 8, max: 30, step: 1}
-  adxThresh: {type: float, min: 10.0, max: 30.0, step: 1.0, requires: useAdx}
-  useEma: {type: bool}
-  emaFastLen: {type: int, min: 5, max: 20, step: 1, requires: useEma}
-  emaSlowLen: {type: int, min: 15, max: 60, step: 1, requires: useEma}
-  emaMode: {type: choice, values: ["Trend", "Reversal"], requires: useEma}
-  useBb: {type: bool}
-  bbLenFilter: {type: int, min: 10, max: 40, step: 2, requires: useBb}
-  bbMultFilter: {type: float, min: 1.5, max: 3.0, step: 0.1, requires: useBb}
-  useStochRsi: {type: bool}
-  stochLen: {type: int, min: 8, max: 28, step: 1, requires: useStochRsi}
-  stochOB: {type: float, min: 70.0, max: 90.0, step: 1.0, requires: useStochRsi}
-  stochOS: {type: float, min: 10.0, max: 30.0, step: 1.0, requires: useStochRsi}
-  useObv: {type: bool}
-  obvSmoothLen: {type: int, min: 2, max: 10, step: 1, requires: useObv}
-  useHtfTrend: {type: bool}
-  htfTrendTf: {type: choice, values: ["60", "120", "240"], requires: useHtfTrend}
-  htfMaLen: {type: int, min: 10, max: 60, step: 5, requires: useHtfTrend}
-  useHmaFilter: {type: bool}
-  hmaLen: {type: int, min: 10, max: 60, step: 5, requires: useHmaFilter}
-  useRangeFilter: {type: bool}
-  rangeTf: {type: choice, values: ["3", "5", "15"], requires: useRangeFilter}
-  rangeBars: {type: int, min: 10, max: 40, step: 2, requires: useRangeFilter}
-  rangePercent: {type: float, min: 0.5, max: 2.5, step: 0.1, requires: useRangeFilter}
-  useRegimeFilter: {type: bool}
-  ctxHtfTf: {type: choice, values: ["120", "240", "360"], requires: useRegimeFilter}
-  ctxHtfEmaLen: {type: int, min: 60, max: 180, step: 10, requires: useRegimeFilter}
-  ctxHtfAdxLen: {type: int, min: 10, max: 30, step: 1, requires: useRegimeFilter}
-  ctxHtfAdxTh: {type: float, min: 15.0, max: 35.0, step: 1.0, requires: useRegimeFilter}
-  useSlopeFilter: {type: bool}
-  slopeLookback: {type: int, min: 5, max: 20, step: 1, requires: useSlopeFilter}
-  slopeMinPct: {type: float, min: 0.02, max: 0.12, step: 0.01, requires: useSlopeFilter}
-  useDistanceGuard: {type: bool}
-  distanceAtrLen: {type: int, min: 14, max: 40, step: 1, requires: useDistanceGuard}
-  distanceTrendLen: {type: int, min: 34, max: 80, step: 1, requires: useDistanceGuard}
-  distanceMaxAtr: {type: float, min: 1.5, max: 3.5, step: 0.1, requires: useDistanceGuard}
-  useEquitySlopeFilter: {type: bool}
-  eqSlopeLen: {type: int, min: 60, max: 180, step: 10, requires: useEquitySlopeFilter}
-  useSqzGate: {type: bool}
-  sqzReleaseBars: {type: int, min: 2, max: 10, step: 1, requires: useSqzGate}
-  useStructureGate: {type: bool}
-  structureGateMode: {type: choice, values: ["어느 하나 충족", "모두 충족"], requires: useStructureGate}
-  useBOS: {type: bool, requires: useStructureGate}
-  useCHOCH: {type: bool, requires: useStructureGate}
-  bos_stateBars: {type: int, min: 3, max: 10, step: 1, requires: useBOS}
-  choch_stateBars: {type: int, min: 3, max: 10, step: 1, requires: useCHOCH}
-  bosTf: {type: choice, values: ["5", "15", "30"], requires: useStructureGate}
-  bosLookback: {type: int, min: 20, max: 80, step: 5, requires: useBOS}
-  pivotLeft_vn: {type: int, min: 3, max: 10, step: 1, requires: useStructureGate}
-  pivotRight_vn: {type: int, min: 3, max: 10, step: 1, requires: useStructureGate}
-  useReversal: {type: bool}
-  reversalDelaySec: {type: float, min: 0.0, max: 120.0, step: 5.0, requires: useReversal}
-  exitOpposite: {type: bool}
-  useMomFade: {type: bool}
-  momFadeBars: {type: int, min: 1, max: 6, step: 1, requires: useMomFade}
-  momFadeRegLen: {type: int, min: 10, max: 40, step: 2, requires: useMomFade}
-  momFadeBbLen: {type: int, min: 10, max: 40, step: 2, requires: useMomFade}
-  momFadeKcLen: {type: int, min: 10, max: 40, step: 2, requires: useMomFade}
-  momFadeBbMult: {type: float, min: 1.5, max: 3.0, step: 0.1, requires: useMomFade}
-  momFadeKcMult: {type: float, min: 1.0, max: 2.5, step: 0.1, requires: useMomFade}
-  momFadeUseTrueRange: {type: bool, requires: useMomFade}
-  momFadeZeroDelay: {type: int, min: 0, max: 3, step: 1, requires: useMomFade}
-  momFadeMinAbs: {type: float, min: 0.0, max: 1.5, step: 0.05, requires: useMomFade}
-  momFadeReleaseOnly: {type: bool, requires: useMomFade}
-  momFadeMinBarsAfterRel: {type: int, min: 1, max: 6, step: 1, requires: useMomFade}
-  momFadeWindowBars: {type: int, min: 3, max: 12, step: 1, requires: useMomFade}
-  momFadeRequireTwoBars: {type: bool, requires: useMomFade}
-  useAtrProfit: {type: bool}
-  atrProfitMult: {type: float, min: 1.0, max: 4.0, step: 0.25, requires: useAtrProfit}
-  useDynVol: {type: bool}
-  useStopDistanceGuard: {type: bool}
-  maxStopAtrMult: {type: float, min: 1.5, max: 3.5, step: 0.1, requires: useStopDistanceGuard}
-  useKASA: {type: bool}
-  kasa_rsiLen: {type: int, min: 8, max: 28, step: 1, requires: useKASA}
-  kasa_rsiOB: {type: float, min: 60.0, max: 90.0, step: 1.0, requires: useKASA}
-  kasa_rsiOS: {type: float, min: 10.0, max: 40.0, step: 1.0, requires: useKASA}
+  # --- Squeeze (BB vs KC) ---
+  bbLen:        { type: int,   min: 12, max: 30, step: 2 }
+  bbMult:       { type: float, min: 1.5, max: 2.5, step: 0.25 }
+  kcLen:        { type: int,   min: 12, max: 30, step: 2 }
+  kcMultATR:    { type: float, min: 1.0, max: 2.0, step: 0.2 }
+  kcBasis:      { type: str,   choices: ["ema", "sma"] }
+
+  # --- Momentum (SMD) ---
+  momLen:       { type: int,   min: 8,  max: 48, step: 2 }
+  thr:          { type: float, min: 0.2, max: 2.0, step: 0.1 }
+  requireFlux:  { type: bool }
+
+  # --- Exits ---
+  exitOpposite: { type: bool }
+  useFadeExit:  { type: bool }
+  fadeLevel:    { type: float, min: -0.2, max: 0.2, step: 0.05 }
+
+  # --- Risk ---
+  useSL:        { type: bool }
+  slPct:        { type: float, min: 0.3, max: 3.0, step: 0.1 }
+  cooldownBars: { type: int,   min: 0,   max: 10,  step: 1 }
+
+risk:
+  leverage: 10
+  fee_pct: 0.0006
+  slippage_ticks: 3

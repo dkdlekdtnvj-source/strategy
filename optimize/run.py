@@ -32,7 +32,6 @@ from optimize.metrics import (
     equity_curve_from_returns,
     evaluate_objective_values,
     normalise_objectives,
-    score_metrics,
 )
 from optimize.report import generate_reports, write_bank_file, write_trials_dataframe
 from optimize.search_spaces import build_space, grid_choices, mutate_around, sample_parameters
@@ -44,52 +43,39 @@ from optimize.llm import generate_llm_candidates
 LOGGER = logging.getLogger("optimize")
 logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
 
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+CPU_COUNT = os.cpu_count() or 4
+DEFAULT_DATASET_JOBS = max(1, CPU_COUNT // 2)
+DEFAULT_OPTUNA_JOBS = max(1, CPU_COUNT // 2)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REPORT_ROOT = Path("reports")
 STUDY_ROOT = Path("studies")
 NON_FINITE_PENALTY = -1e12
 
+# 단순 메트릭 계산 경로 사용 여부 (CLI 인자/설정으로 갱신됩니다).
+simple_metrics_enabled: bool = False
+
 # 기본 팩터 최적화에 사용할 파라미터 키 집합입니다.
 # 복잡한 보호 장치·부가 필터 대신 핵심 진입 로직과 직접 관련된 항목만 남겨
 # 탐색 공간을 크게 줄이고 수렴 속도를 높입니다.
 BASIC_FACTOR_KEYS = {
-    "timeframe",
-    "htf",
-    "oscLen",
-    "signalLen",
-    "useSameLen",
     "bbLen",
-    "kcLen",
     "bbMult",
-    "kcMult",
-    "fluxLen",
-    "fluxSmoothLen",
-    "useFluxHeikin",
-    "useDynamicThresh",
-    "useSymThreshold",
-    "statThreshold",
-    "buyThreshold",
-    "sellThreshold",
-    "dynLen",
-    "dynMult",
-    "requireMomentumCross",
-    "useHTF",
-    "htfEmaLen",
+    "kcLen",
+    "kcMultATR",
+    "kcBasis",
+    "momLen",
+    "thr",
+    "requireFlux",
     "exitOpposite",
-    "useMomFade",
-    "momFadeBars",
-    "momFadeRegLen",
-    "momFadeBbLen",
-    "momFadeKcLen",
-    "momFadeBbMult",
-    "momFadeKcMult",
-    "momFadeUseTrueRange",
-    "momFadeZeroDelay",
-    "momFadeMinAbs",
-    "momFadeReleaseOnly",
-    "momFadeMinBarsAfterRel",
-    "momFadeWindowBars",
-    "momFadeRequireTwoBars",
+    "useFadeExit",
+    "fadeLevel",
+    "useSL",
+    "slPct",
+    "cooldownBars",
 }
 
 
@@ -701,15 +687,118 @@ def prepare_datasets(
     backtest_cfg: Dict[str, object],
     data_dir: Path,
 ) -> List[DatasetSpec]:
-    cache = DataCache(data_dir, futures=bool(backtest_cfg.get("futures", False)))
+    data_cfg = backtest_cfg.get("data") if isinstance(backtest_cfg.get("data"), dict) else {}
+    cache_root = Path(data_dir).expanduser()
+    futures_flag = bool(backtest_cfg.get("futures", False))
+    if data_cfg:
+        market_text = str(data_cfg.get("market", "")).lower()
+        if market_text == "futures":
+            futures_flag = True
+        elif market_text == "spot":
+            futures_flag = False
+        if "futures" in data_cfg:
+            futures_flag = bool(data_cfg.get("futures"))
+        cache_override = data_cfg.get("cache_dir")
+        if cache_override:
+            cache_root = Path(cache_override).expanduser()
+    cache = DataCache(cache_root, futures=futures_flag)
 
-    base_symbol = str(params_cfg.get("symbol"))
-    base_timeframe = str(params_cfg.get("timeframe"))
+    base_symbol = str(params_cfg.get("symbol")) if params_cfg.get("symbol") else ""
+    base_timeframe = str(params_cfg.get("timeframe")) if params_cfg.get("timeframe") else ""
     base_period = params_cfg.get("backtest", {}) or {}
+
+    alias_map: Dict[str, str] = {}
+    for source in (backtest_cfg.get("symbol_aliases"), params_cfg.get("symbol_aliases")):
+        if isinstance(source, dict):
+            for key, value in source.items():
+                if key and value:
+                    alias_map[str(key)] = str(value)
+
+    def _to_list(value: Optional[object]) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            return [str(v) for v in value if v]
+        text = str(value)
+        return [text] if text else []
+
+    dataset_entries = backtest_cfg.get("datasets")
+    if isinstance(dataset_entries, list) and dataset_entries:
+        datasets: List[DatasetSpec] = []
+        for entry in dataset_entries:
+            if not isinstance(entry, dict):
+                continue
+            symbol_value = (
+                entry.get("symbol")
+                or entry.get("name")
+                or entry.get("id")
+                or entry.get("ticker")
+            )
+            if not symbol_value:
+                raise ValueError("datasets 항목에 symbol 키가 필요합니다.")
+            display_symbol, source_symbol = _resolve_symbol_entry(str(symbol_value), alias_map)
+
+            ltf_candidates = _to_list(entry.get("ltf") or entry.get("ltfs") or entry.get("timeframes"))
+            if not ltf_candidates:
+                raise ValueError(f"{symbol_value} 데이터셋에 최소 하나의 ltf/timeframe 이 필요합니다.")
+
+            htf_candidates = _to_list(
+                entry.get("htf")
+                or entry.get("htfs")
+                or entry.get("htf_timeframes")
+                or entry.get("htf_timeframe")
+            )
+            if not htf_candidates:
+                htf_candidates = [None]
+
+            start_value = entry.get("start") or entry.get("from") or base_period.get("from")
+            end_value = entry.get("end") or entry.get("to") or base_period.get("to")
+            if not start_value or not end_value:
+                raise ValueError(f"{symbol_value} 데이터셋에 start/end 구간이 필요합니다.")
+            start = str(start_value)
+            end = str(end_value)
+
+            symbol_log = (
+                display_symbol if display_symbol == source_symbol else f"{display_symbol}→{source_symbol}"
+            )
+            for timeframe in ltf_candidates:
+                timeframe_text = str(timeframe)
+                for htf_tf in htf_candidates or [None]:
+                    htf_text = str(htf_tf) if htf_tf else None
+                    LOGGER.info(
+                        "Preparing dataset %s %s (HTF %s) %s→%s",
+                        symbol_log,
+                        timeframe_text,
+                        htf_text or "-",
+                        start,
+                        end,
+                    )
+                    df = cache.get(source_symbol, timeframe_text, start, end)
+                    htf_df = (
+                        cache.get(source_symbol, htf_text, start, end, allow_partial=True)
+                        if htf_text
+                        else None
+                    )
+                    datasets.append(
+                        DatasetSpec(
+                            symbol=display_symbol,
+                            timeframe=timeframe_text,
+                            start=start,
+                            end=end,
+                            df=df,
+                            htf=htf_df,
+                            htf_timeframe=htf_text,
+                            source_symbol=source_symbol,
+                        )
+                    )
+        if not datasets:
+            raise ValueError("backtest.datasets 설정에서 어떤 데이터셋도 생성되지 않았습니다.")
+        return datasets
 
     symbols = backtest_cfg.get("symbols") or ([base_symbol] if base_symbol else [])
     timeframes = backtest_cfg.get("timeframes") or ([base_timeframe] if base_timeframe else [])
     if timeframes:
+
         def _tf_priority(tf: str) -> Tuple[int, float]:
             text = str(tf).strip().lower()
             if text == "1m":
@@ -729,21 +818,6 @@ def prepare_datasets(
         raise ValueError(
             "Backtest configuration must specify symbol(s), timeframe(s), and at least one period with 'from'/'to' dates."
         )
-
-    alias_map: Dict[str, str] = {}
-    for source in (backtest_cfg.get("symbol_aliases"), params_cfg.get("symbol_aliases")):
-        if isinstance(source, dict):
-            for key, value in source.items():
-                if key and value:
-                    alias_map[str(key)] = str(value)
-
-    # Allow either a single HTF timeframe or a list so that users can compare 15m vs 1h, etc.
-    def _to_list(value: Optional[object]) -> List[str]:
-        if value is None:
-            return []
-        if isinstance(value, (list, tuple)):
-            return [str(v) for v in value if v]
-        return [str(value)] if str(value) else []
 
     htf_candidates = _to_list(params_cfg.get("htf_timeframes"))
     if not htf_candidates:
@@ -987,6 +1061,49 @@ def combine_metrics(
     return aggregated
 
 
+def compute_score_pf_basic(
+    metrics: Dict[str, object], constraints: Optional[Dict[str, object]] = None
+) -> float:
+    """ProfitFactor 중심 기본 점수를 계산합니다."""
+
+    constraints = constraints or {}
+
+    def _as_float(value: object, default: float = 0.0) -> float:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return default
+        if not np.isfinite(number):
+            return default
+        return number
+
+    pf = _as_float(metrics.get("ProfitFactor"), 0.0)
+
+    dd_raw = metrics.get("MaxDD")
+    if dd_raw is None:
+        dd_raw = metrics.get("MaxDrawdown")
+    dd_value = abs(_as_float(dd_raw, 0.0))
+    dd_pct = dd_value * 100.0 if dd_value <= 1.0 else dd_value
+
+    trades_raw = metrics.get("Trades")
+    if trades_raw is None:
+        trades_raw = metrics.get("TotalTrades")
+    trades = int(round(_as_float(trades_raw, 0.0)))
+
+    min_trades = int(round(_as_float(constraints.get("min_trades_test"), 12.0)))
+    max_dd = _as_float(constraints.get("max_dd_pct"), 70.0)
+
+    base = pf
+
+    if trades < min_trades:
+        base -= (min_trades - trades) * 0.2
+
+    if dd_pct > max_dd:
+        base -= (dd_pct - max_dd) * 0.05
+
+    return base
+
+
 def _clean_metrics(metrics: Dict[str, object]) -> Dict[str, object]:
     clean: Dict[str, object] = {}
     for key, value in metrics.items():
@@ -1150,6 +1267,12 @@ def optimisation_loop(
             if candidate.exists():
                 candidate.unlink()
     non_finite_penalty = float(search_cfg.get("non_finite_penalty", NON_FINITE_PENALTY))
+    constraints_raw = params_cfg.get("constraints")
+    constraints_cfg = dict(constraints_raw) if isinstance(constraints_raw, dict) else {}
+    if not constraints_cfg:
+        backtest_constraints = backtest_cfg.get("constraints")
+        if isinstance(backtest_constraints, dict):
+            constraints_cfg = dict(backtest_constraints)
     llm_cfg = params_cfg.get("llm", {}) if isinstance(params_cfg.get("llm"), dict) else {}
 
     nsga_params_cfg = search_cfg.get("nsga_params") or {}
@@ -1358,6 +1481,7 @@ def optimisation_loop(
         )
         dataset_metrics: List[Dict[str, object]] = []
         numeric_metrics: List[Dict[str, float]] = []
+        dataset_scores: List[float] = []
 
         def _sanitise(value: float, stage: str) -> float:
             try:
@@ -1374,7 +1498,13 @@ def optimisation_loop(
                 return non_finite_penalty
             return numeric
 
-        def _consume_dataset(idx: int, dataset: DatasetSpec, metrics: Dict[str, float]) -> None:
+        def _consume_dataset(
+            idx: int,
+            dataset: DatasetSpec,
+            metrics: Dict[str, float],
+            *,
+            simple_override: bool = False,
+        ) -> None:
             numeric_metrics.append(metrics)
             dataset_metrics.append(
                 {
@@ -1384,11 +1514,16 @@ def optimisation_loop(
                 }
             )
 
-            partial_metrics = combine_metrics(
-                numeric_metrics, simple_override=simple_metrics_enabled
-            )
-            partial_score = score_metrics(partial_metrics, objective_specs)
+            dataset_score = compute_score_pf_basic(metrics, constraints_cfg)
+            dataset_score = _sanitise(dataset_score, f"dataset@{idx}")
+            dataset_scores.append(dataset_score)
+
+            partial_score = sum(dataset_scores) / max(1, len(dataset_scores))
             partial_score = _sanitise(partial_score, f"partial@{idx}")
+
+            partial_metrics = combine_metrics(
+                numeric_metrics, simple_override=simple_override
+            )
             partial_objectives: Optional[Tuple[float, ...]] = (
                 evaluate_objective_values(partial_metrics, objective_specs, non_finite_penalty)
                 if multi_objective
@@ -1459,7 +1594,9 @@ def optimisation_loop(
                         )
                         raise
                     try:
-                        _consume_dataset(idx, dataset, metrics)
+                        _consume_dataset(
+                            idx, dataset, metrics, simple_override=simple_metrics_enabled
+                        )
                     except optuna.TrialPruned:
                         for pending in futures[idx:]:
                             pending.cancel()
@@ -1476,12 +1613,17 @@ def optimisation_loop(
                         dataset.htf_timeframe,
                     )
                     raise
-                _consume_dataset(idx, dataset, metrics)
+                _consume_dataset(
+                    idx, dataset, metrics, simple_override=simple_metrics_enabled
+                )
 
         aggregated = combine_metrics(
             numeric_metrics, simple_override=simple_metrics_enabled
         )
-        score = score_metrics(aggregated, objective_specs)
+        if dataset_scores:
+            score = sum(dataset_scores) / len(dataset_scores)
+        else:
+            score = non_finite_penalty
         score = _sanitise(score, "final")
         objective_values = (
             evaluate_objective_values(aggregated, objective_specs, non_finite_penalty)
@@ -1612,7 +1754,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--simple-metrics",
         action="store_true",
-        help="단순 ProfitFactor 경로만 계산하도록 강제합니다",
+        help="간단 메트릭만 계산해 빠르게 탐색",
     )
     parser.add_argument(
         "--simple-profit",
@@ -1641,9 +1783,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-trials", type=int, help="Override Optuna trial count")
     parser.add_argument("--n-jobs", type=int, help="Optuna 병렬 worker 수 (기본 1)")
     parser.add_argument(
+        "--optuna-jobs",
+        type=int,
+        default=DEFAULT_OPTUNA_JOBS,
+        help="Optuna 트라이얼 병렬 n_jobs. 기본=코어수 절반",
+    )
+    parser.add_argument(
         "--dataset-jobs",
         type=int,
-        help="단일 실험 내 데이터셋 병렬 백테스트 worker 수를 지정합니다",
+        default=DEFAULT_DATASET_JOBS,
+        help="데이터셋 병렬 워커 수 (process). 기본=코어수 절반",
     )
     parser.add_argument(
         "--dataset-executor",
@@ -1689,7 +1838,14 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     """Parse CLI arguments and return a populated :class:`Namespace`."""
 
-    return build_parser().parse_args(argv)
+    args = build_parser().parse_args(argv)
+    global simple_metrics_enabled
+    simple_metrics_enabled = bool(
+        getattr(args, "simple_metrics", False) or getattr(args, "simple_profit", False)
+    )
+    if getattr(args, "no_simple_metrics", False):
+        simple_metrics_enabled = False
+    return args
 
 
 def _execute_single(
@@ -1704,6 +1860,16 @@ def _execute_single(
     backtest_cfg.setdefault("symbols", backtest_cfg.get("symbols", []))
     backtest_cfg.setdefault("timeframes", backtest_cfg.get("timeframes", []))
     backtest_cfg.setdefault("htf_timeframes", backtest_cfg.get("htf_timeframes", []))
+
+    cli_tokens = list(argv or [])
+
+    def _has_flag(flag: str) -> bool:
+        return any(token == flag or token.startswith(f"{flag}=") for token in cli_tokens)
+
+    search_cfg = _ensure_dict(params_cfg, "search")
+    search_cfg.setdefault("n_jobs", DEFAULT_OPTUNA_JOBS)
+    search_cfg.setdefault("dataset_jobs", DEFAULT_DATASET_JOBS)
+    search_cfg.setdefault("dataset_executor", "process")
 
     batch_ctx = getattr(args, "_batch_context", None)
     if batch_ctx:
@@ -1730,19 +1896,27 @@ def _execute_single(
             raise ValueError(f"배치 템플릿 해석에 실패했습니다: {exc}") from exc
 
     if args.n_trials is not None:
-        search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["n_trials"] = int(args.n_trials)
 
     if args.n_jobs is not None:
-        search_cfg = _ensure_dict(params_cfg, "search")
         try:
             search_cfg["n_jobs"] = max(1, int(args.n_jobs))
         except (TypeError, ValueError):
             LOGGER.warning("--n-jobs 값 '%s' 이 올바르지 않아 1로 설정합니다.", args.n_jobs)
             search_cfg["n_jobs"] = 1
 
-    if args.dataset_jobs is not None:
-        search_cfg = _ensure_dict(params_cfg, "search")
+    if _has_flag("--optuna-jobs"):
+        try:
+            search_cfg["n_jobs"] = max(1, int(args.optuna_jobs))
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "--optuna-jobs 값 '%s' 이 올바르지 않아 %d로 설정합니다.",
+                args.optuna_jobs,
+                DEFAULT_OPTUNA_JOBS,
+            )
+            search_cfg["n_jobs"] = DEFAULT_OPTUNA_JOBS
+
+    if _has_flag("--dataset-jobs"):
         try:
             search_cfg["dataset_jobs"] = max(1, int(args.dataset_jobs))
         except (TypeError, ValueError):
@@ -1753,34 +1927,26 @@ def _execute_single(
             search_cfg["dataset_jobs"] = 1
 
     if args.dataset_executor:
-        search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["dataset_executor"] = args.dataset_executor
 
     if args.dataset_start_method:
-        search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["dataset_start_method"] = args.dataset_start_method
 
     if getattr(args, "full_space", False):
-        search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["basic_factor_profile"] = False
     elif getattr(args, "basic_factors_only", False):
-        search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["basic_factor_profile"] = True
 
     if args.study_name:
-        search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["study_name"] = args.study_name
 
     if args.storage_url:
-        search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["storage_url"] = args.storage_url
 
     if args.storage_url_env:
-        search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["storage_url_env"] = args.storage_url_env
 
     if args.pruner:
-        search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["pruner"] = args.pruner
 
     forced_params: Dict[str, object] = dict(params_cfg.get("overrides", {}))
@@ -1919,6 +2085,7 @@ def _execute_single(
         if decision is not None:
             _apply_simple_metrics(decision)
 
+    global simple_metrics_enabled
     simple_metrics_enabled = bool(forced_params.get("simpleMetricsOnly", False))
     if simple_metrics_enabled:
         LOGGER.info("단순 ProfitFactor 기반 계산 경로를 강제 활성화합니다.")
@@ -1971,7 +2138,11 @@ def _execute_single(
     fees = merge_dicts(params_cfg.get("fees", {}), backtest_cfg.get("fees", {}))
     risk = merge_dicts(params_cfg.get("risk", {}), backtest_cfg.get("risk", {}))
 
-    objectives_raw = params_cfg.get("objectives", [])
+    objectives_raw = params_cfg.get("objectives")
+    if not objectives_raw:
+        objectives_raw = params_cfg.get("objective")
+    if objectives_raw is None:
+        objectives_raw = []
     if isinstance(objectives_raw, (list, tuple)):
         objectives_config: List[object] = list(objectives_raw)
     elif objectives_raw:
@@ -2027,7 +2198,11 @@ def _execute_single(
     else:
         LOGGER.warning("No Optuna study returned; skipping trials export")
 
-    walk_cfg = params_cfg.get("walk_forward", {"train_bars": 5000, "test_bars": 2000, "step": 2000})
+    walk_cfg = (
+        params_cfg.get("walk_forward")
+        or backtest_cfg.get("walk_forward")
+        or {"train_bars": 5000, "test_bars": 2000, "step": 2000}
+    )
     dataset_groups, timeframe_groups, default_key = _group_datasets(datasets)
 
     def _resolve_record_dataset(record: Dict[str, object]) -> Tuple[Tuple[str, Optional[str]], List[DatasetSpec]]:
@@ -2314,4 +2489,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
 
 if __name__ == "__main__":
+    import multiprocessing as mp
+
+    mp.freeze_support()
     main()
