@@ -47,6 +47,49 @@ DEFAULT_REPORT_ROOT = Path("reports")
 STUDY_ROOT = Path("studies")
 NON_FINITE_PENALTY = -1e12
 
+# 기본 팩터 최적화에 사용할 파라미터 키 집합입니다.
+# 복잡한 보호 장치·부가 필터 대신 핵심 진입 로직과 직접 관련된 항목만 남겨
+# 탐색 공간을 크게 줄이고 수렴 속도를 높입니다.
+BASIC_FACTOR_KEYS = {
+    "timeframe",
+    "htf",
+    "oscLen",
+    "signalLen",
+    "useSameLen",
+    "bbLen",
+    "kcLen",
+    "bbMult",
+    "kcMult",
+    "fluxLen",
+    "fluxSmoothLen",
+    "useFluxHeikin",
+    "useDynamicThresh",
+    "useSymThreshold",
+    "statThreshold",
+    "buyThreshold",
+    "sellThreshold",
+    "dynLen",
+    "dynMult",
+    "requireMomentumCross",
+    "useHTF",
+    "htfEmaLen",
+    "exitOpposite",
+    "useMomFade",
+    "momFadeBars",
+    "momFadeRegLen",
+    "momFadeBbLen",
+    "momFadeKcLen",
+    "momFadeBbMult",
+    "momFadeKcMult",
+    "momFadeUseTrueRange",
+    "momFadeZeroDelay",
+    "momFadeMinAbs",
+    "momFadeReleaseOnly",
+    "momFadeMinBarsAfterRel",
+    "momFadeWindowBars",
+    "momFadeRequireTwoBars",
+}
+
 
 def _utcnow_isoformat() -> str:
     """현재 UTC 시각을 ISO8601 ``Z`` 표기 문자열로 반환합니다."""
@@ -68,6 +111,27 @@ def _slugify_timeframe(timeframe: Optional[str]) -> str:
 def _space_hash(space: Dict[str, object]) -> str:
     payload = json.dumps(space or {}, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _restrict_to_basic_factors(space: Dict[str, Dict[str, object]]) -> Dict[str, Dict[str, object]]:
+    """기본 팩터만 남긴 탐색 공간 사본을 반환합니다."""
+
+    if not space:
+        return {}
+
+    filtered: Dict[str, Dict[str, object]] = {}
+    for name, spec in space.items():
+        if name in BASIC_FACTOR_KEYS:
+            filtered[name] = dict(spec)
+    return filtered
+
+
+def _filter_basic_factor_params(params: Dict[str, object]) -> Dict[str, object]:
+    """기본 팩터 키만 남겨 파라미터 딕셔너리를 정리합니다."""
+
+    if not params:
+        return {}
+    return {key: value for key, value in params.items() if key in BASIC_FACTOR_KEYS}
 
 
 def _git_revision() -> Optional[str]:
@@ -315,9 +379,19 @@ def _load_seed_trials(
         params = entry.get("params")
         if not isinstance(params, dict):
             continue
-        seeds.append(dict(params))
-        mutated = mutate_around(params, space, scale=float(payload.get("mutation_scale", 0.1)), rng=rng)
-        seeds.append(mutated)
+        filtered_params = _filter_basic_factor_params(dict(params))
+        if not filtered_params:
+            continue
+        seeds.append(filtered_params)
+        mutated = mutate_around(
+            filtered_params,
+            space,
+            scale=float(payload.get("mutation_scale", 0.1)),
+            rng=rng,
+        )
+        mutated_filtered = _filter_basic_factor_params(mutated)
+        if mutated_filtered:
+            seeds.append(mutated_filtered)
     return seeds
 
 
@@ -710,6 +784,7 @@ def combine_metrics(metric_list: List[Dict[str, float]]) -> Dict[str, float]:
 
     combined_trades: List[Trade] = []
     combined_returns: List[pd.Series] = []
+    simple_mode = False
 
     for metrics in metric_list:
         returns = metrics.get("Returns")
@@ -718,12 +793,16 @@ def combine_metrics(metric_list: List[Dict[str, float]]) -> Dict[str, float]:
         trades = metrics.get("TradesList")
         if isinstance(trades, list):
             combined_trades.extend(trades)
+        if not simple_mode and bool(metrics.get("SimpleMetricsOnly")):
+            simple_mode = True
 
     merged_returns = pd.concat(combined_returns, axis=0) if combined_returns else pd.Series(dtype=float)
     merged_returns = merged_returns.sort_index()
     combined_trades.sort(key=lambda trade: (getattr(trade, "entry_time", None), getattr(trade, "exit_time", None)))
 
-    aggregated = aggregate_metrics(combined_trades, merged_returns)
+    aggregated = aggregate_metrics(combined_trades, merged_returns, simple=simple_mode)
+    if simple_mode:
+        aggregated["SimpleMetricsOnly"] = True
 
     aggregated["Trades"] = int(aggregated.get("Trades", 0))
     aggregated["Wins"] = int(aggregated.get("Wins", 0))
@@ -807,9 +886,25 @@ def optimisation_loop(
         objective_specs = [ObjectiveSpec(name="NetProfit")]
     multi_objective = bool(search_cfg.get("multi_objective", False)) and len(objective_specs) > 1
     directions = [spec.direction for spec in objective_specs]
-    space = build_space(params_cfg.get("space", {}))
+    original_space = build_space(params_cfg.get("space", {}))
+    restricted_space = _restrict_to_basic_factors(original_space)
+    if len(restricted_space) != len(original_space):
+        LOGGER.info(
+            "기본 팩터 프로파일: %d→%d개 파라미터로 탐색 공간을 축소합니다.",
+            len(original_space),
+            len(restricted_space),
+        )
+        if not restricted_space:
+            LOGGER.warning(
+                "기본 팩터 집합에 해당하는 항목이 없어 탐색 공간이 비었습니다."
+                " space 설정을 점검하세요."
+            )
+    space = restricted_space
+    params_cfg["space"] = space
 
     dataset_groups, timeframe_groups, default_key = _group_datasets(datasets)
+
+    available_cpu = max(1, multiprocessing.cpu_count())
 
     raw_n_jobs = search_cfg.get("n_jobs", 1)
     try:
@@ -817,6 +912,14 @@ def optimisation_loop(
     except (TypeError, ValueError):
         LOGGER.warning("search.n_jobs 값 '%s' 을 해석할 수 없어 1로 대체합니다.", raw_n_jobs)
         n_jobs = 1
+    if n_trials := int(search_cfg.get("n_trials", 0) or 0):
+        auto_jobs = max(1, min(available_cpu, n_trials))
+    else:
+        auto_jobs = max(1, available_cpu)
+    if n_jobs <= 1 and auto_jobs > n_jobs:
+        n_jobs = auto_jobs
+        search_cfg["n_jobs"] = n_jobs
+        LOGGER.info("기본 팩터 프로파일: Optuna worker %d개 자동 할당", n_jobs)
 
     if n_jobs > 1:
         LOGGER.info("Optuna 병렬 worker %d개를 사용합니다.", n_jobs)
@@ -829,6 +932,12 @@ def optimisation_loop(
             "search.dataset_jobs 값 '%s' 을 해석할 수 없어 1로 대체합니다.", raw_dataset_jobs
         )
         dataset_jobs = 1
+    if dataset_jobs <= 1:
+        max_parallel = min(len(datasets) or 1, max(1, available_cpu // max(1, n_jobs)))
+        if max_parallel > 1:
+            dataset_jobs = max_parallel
+            search_cfg["dataset_jobs"] = dataset_jobs
+            LOGGER.info("기본 팩터 프로파일: dataset_jobs=%d 자동 설정", dataset_jobs)
 
     dataset_executor = str(search_cfg.get("dataset_executor", "thread") or "thread").lower()
     if dataset_executor not in {"thread", "process"}:
@@ -1050,9 +1159,13 @@ def optimisation_loop(
                 return
 
         best_value = _normalise_value(selected_trial.value)
+        best_params_full = {key: _to_native(val) for key, val in selected_trial.params.items()}
         snapshot = {
             "best_value": best_value,
-            "best_params": {key: _to_native(val) for key, val in selected_trial.params.items()},
+            "best_params": best_params_full,
+            "basic_params": {
+                key: value for key, value in best_params_full.items() if key in BASIC_FACTOR_KEYS
+            },
         }
         with best_yaml_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(snapshot, handle, allow_unicode=True, sort_keys=False)
@@ -1235,7 +1348,9 @@ def optimisation_loop(
             _run_optuna(llm_initial)
             candidates = generate_llm_candidates(space, study.trials, llm_cfg)
             for candidate in candidates[:llm_count]:
-                trial_params = dict(candidate)
+                trial_params = _filter_basic_factor_params(dict(candidate))
+                if not trial_params:
+                    continue
                 trial_params.update(forced_params)
                 try:
                     study.enqueue_trial(trial_params, skip_if_exists=True)
@@ -1551,10 +1666,12 @@ def _execute_single(
         backtest_risk["simpleMetricsOnly"] = decision
         backtest_risk["simpleProfitOnly"] = decision
 
-    if getattr(args, "simple_metrics", False) or getattr(args, "simple_profit", False):
-        _apply_simple_metrics(True)
-    elif getattr(args, "no_simple_metrics", False):
+    # 기본 모드는 ProfitFactor 중심 단순 지표 경로를 강제해 계산량을 줄입니다.
+    _apply_simple_metrics(True)
+    if getattr(args, "no_simple_metrics", False):
         _apply_simple_metrics(False)
+    elif getattr(args, "simple_metrics", False) or getattr(args, "simple_profit", False):
+        _apply_simple_metrics(True)
 
     if args.interactive:
         leverage_default = risk_cfg.get("leverage")
@@ -1827,11 +1944,12 @@ def _execute_single(
     bank_entries: List[Dict[str, object]] = []
     for item in candidate_summaries:
         trial_record = trial_index.get(item["trial"], {})
+        filtered_params = _filter_basic_factor_params(item.get("params") or {})
         entry = {
             "trial": item["trial"],
             "score": item.get("score"),
             "oos_mean": item.get("oos_mean"),
-            "params": item.get("params"),
+            "params": filtered_params,
             "metrics": trial_record.get("metrics"),
             "timeframe": item.get("timeframe"),
             "htf_timeframe": item.get("htf_timeframe"),

@@ -1646,6 +1646,8 @@ def run_backtest(
         close_position(df.index[-1], df.iloc[-1]["close"], "EndOfData")
 
     metrics = aggregate_metrics(trades, returns_series, simple=simple_metrics_only)
+    if simple_metrics_only:
+        metrics["SimpleMetricsOnly"] = True
     metrics["FinalEquity"] = state.equity
     metrics["NetProfitAbs"] = state.net_profit
     metrics["GuardFrozen"] = float(guard_frozen)
