@@ -72,6 +72,7 @@ pip install -r requirements.txt
    - `--leverage`, `--qty-pct`
    - `--n-trials`
    - `--n-jobs 4` 처럼 Optuna 병렬 worker 수를 지정해 멀티코어를 활용할 수 있습니다.
+   - `--stop-local-time 18:00` 으로 로컬 시각 기준 18시 이후에는 새로운 Optuna 트라이얼이 시작되지 않도록 중단선을 둘 수 있습니다.
    - `--enable name1,name2`, `--disable name3`
    - `--top-k 10` to re-rank the best Optuna trials by walk-forward out-of-sample
      performance.

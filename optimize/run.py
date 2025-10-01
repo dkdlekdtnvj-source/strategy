@@ -11,7 +11,7 @@ import subprocess
 from collections.abc import Sequence as AbcSequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from itertools import product
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -79,6 +79,40 @@ def _git_revision() -> Optional[str]:
         )
     except Exception:
         return None
+
+
+def _parse_local_time(value: str) -> Optional[time]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    text = text.replace(" ", "")
+    hours: Optional[int] = None
+    minutes: Optional[int] = None
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) < 2:
+            return None
+        try:
+            hours = int(parts[0])
+            minutes = int(parts[1])
+        except ValueError:
+            return None
+    else:
+        if not text.isdigit():
+            return None
+        if len(text) <= 2:
+            hours = int(text)
+            minutes = 0
+        else:
+            hours = int(text[:-2])
+            minutes = int(text[-2:])
+    if hours is None or minutes is None:
+        return None
+    if not (0 <= hours <= 23 and 0 <= minutes <= 59):
+        return None
+    return time(hour=hours, minute=minutes)
 
 
 def _next_available_dir(path: Path) -> Path:
@@ -385,6 +419,24 @@ def _prompt_bool(label: str, default: Optional[bool] = None) -> Optional[bool]:
         if not raw:
             return default
         print("Please answer 'y' or 'n'.")
+
+
+def _coerce_bool_or_none(value: object) -> Optional[bool]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "nan"}:
+            return None
+        if text in {"true", "t", "1", "yes", "y", "on"}:
+            return True
+        if text in {"false", "f", "0", "no", "n", "off"}:
+            return False
+    return None
 
 
 def _collect_tokens(items: Iterable[str]) -> List[str]:
@@ -822,6 +874,34 @@ def optimisation_loop(
     algo = str(algo_raw or "bayes").lower()
     seed = search_cfg.get("seed")
     n_trials = int(search_cfg.get("n_trials", 50))
+    stop_local_time_raw = search_cfg.get("stop_local_time")
+    stop_deadline: Optional[datetime] = None
+    stop_time_display: Optional[str] = None
+    if stop_local_time_raw:
+        parsed_time = _parse_local_time(stop_local_time_raw)
+        if parsed_time is None:
+            LOGGER.warning(
+                "로컬 종료 시각 '%s'를 해석하지 못했습니다. 설정을 무시합니다.",
+                stop_local_time_raw,
+            )
+        else:
+            now_local = datetime.now()
+            candidate = now_local.replace(
+                hour=parsed_time.hour,
+                minute=parsed_time.minute,
+                second=0,
+                microsecond=0,
+            )
+            stop_time_display = parsed_time.strftime("%H:%M")
+            if now_local >= candidate:
+                stop_deadline = now_local
+            else:
+                stop_deadline = candidate
+            LOGGER.info(
+                "로컬 종료 시각 %s 이후에는 새로운 Optuna 트라이얼이 시작되지 않습니다.",
+                stop_time_display or str(stop_local_time_raw),
+            )
+    curfew_triggered = False
     forced_params = forced_params or {}
     log_dir_path: Optional[Path] = Path(log_dir) if log_dir else None
     trial_log_path: Optional[Path] = None
@@ -1026,10 +1106,30 @@ def optimisation_loop(
             yaml.safe_dump(snapshot, handle, allow_unicode=True, sort_keys=False)
 
     callbacks: List = []
+    if stop_deadline is not None:
+        target_label = stop_time_display or str(stop_local_time_raw)
+
+        def _stop_at_local_time(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+            nonlocal curfew_triggered
+            if curfew_triggered:
+                return
+            if datetime.now() >= stop_deadline:
+                curfew_triggered = True
+                LOGGER.info(
+                    "로컬 종료 시각 %s 도달로 Optuna 실행을 중단합니다.",
+                    target_label,
+                )
+                study.stop()
+
+        callbacks.append(_stop_at_local_time)
     if trial_log_path is not None:
         callbacks.append(_log_trial)
 
     def objective(trial: optuna.Trial) -> float:
+        nonlocal curfew_triggered
+        if stop_deadline is not None and datetime.now() >= stop_deadline:
+            curfew_triggered = True
+            raise optuna.TrialPruned("로컬 종료 시각 도달")
         params = sample_parameters(trial, space)
         params.update(forced_params)
         key, selected_datasets = _select_datasets_for_params(
@@ -1182,7 +1282,16 @@ def optimisation_loop(
         return score
 
     def _run_optuna(batch: int) -> None:
+        nonlocal curfew_triggered
         if batch <= 0:
+            return
+        if stop_deadline is not None and datetime.now() >= stop_deadline:
+            if not curfew_triggered:
+                curfew_triggered = True
+                LOGGER.info(
+                    "로컬 종료 시각 %s 도달로 Optuna 실행을 중단합니다.",
+                    stop_time_display or str(stop_local_time_raw),
+                )
             return
         study.optimize(
             objective,
@@ -1223,6 +1332,11 @@ def optimisation_loop(
                 df.to_csv(final_csv_path, index=False)
 
     if not results:
+        if stop_deadline is not None:
+            label = stop_time_display or str(stop_local_time_raw)
+            raise RuntimeError(
+                f"로컬 종료 시각 {label} 이후에는 새로운 트라이얼이 실행되지 않았습니다."
+            )
         raise RuntimeError("No completed trials were produced during optimisation.")
 
     def _profit_factor_key(record: Dict[str, object]) -> float:
@@ -1279,12 +1393,52 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end", type=str, help="Override backtest end date (ISO8601)")
     parser.add_argument("--leverage", type=float, help="Override leverage setting")
     parser.add_argument("--qty-pct", type=float, help="Override quantity percent")
+    parser.add_argument(
+        "--simple-metrics",
+        action="store_true",
+        help="단순 ProfitFactor 경로만 계산하도록 강제합니다",
+    )
+    parser.add_argument(
+        "--simple-profit",
+        action="store_true",
+        help="--simple-metrics 와 동일하게 ProfitFactor 전용 지표 경로를 사용합니다",
+    )
+    parser.add_argument(
+        "--no-simple-metrics",
+        action="store_true",
+        help="단순 ProfitFactor 경로 강제 설정을 비활성화합니다",
+    )
     parser.add_argument("--interactive", action="store_true", help="Prompt for dataset and toggle selections")
     parser.add_argument("--enable", action="append", default=[], help="Force-enable boolean parameters (comma separated)")
     parser.add_argument("--disable", action="append", default=[], help="Force-disable boolean parameters (comma separated)")
     parser.add_argument("--top-k", type=int, default=0, help="Re-rank top-K trials by walk-forward OOS mean")
     parser.add_argument("--n-trials", type=int, help="Override Optuna trial count")
     parser.add_argument("--n-jobs", type=int, help="Optuna 병렬 worker 수 (기본 1)")
+    parser.add_argument(
+        "--dataset-jobs",
+        type=int,
+        help="단일 실험 내 데이터셋 병렬 백테스트 worker 수를 지정합니다",
+    )
+    parser.add_argument(
+        "--dataset-executor",
+        choices=["thread", "process"],
+        help="데이터셋 병렬 백테스트 실행기를 지정합니다",
+    )
+    parser.add_argument(
+        "--dataset-start-method",
+        type=str,
+        help="Process executor 사용 시 multiprocessing start method 를 지정합니다",
+    )
+    parser.add_argument(
+        "--auto-workers",
+        action="store_true",
+        help="가용 CPU 기반으로 Optuna worker 와 데이터셋 병렬 구성을 자동 조정합니다",
+    )
+    parser.add_argument(
+        "--stop-local-time",
+        type=str,
+        help="지정한 로컬 시각(HH:MM 또는 HHMM) 이후에는 새 Optuna 트라이얼을 시작하지 않습니다",
+    )
     parser.add_argument("--study-name", type=str, help="Override Optuna study name")
     parser.add_argument(
         "--study-template",
@@ -1366,6 +1520,29 @@ def _execute_single(
             LOGGER.warning("--n-jobs 값 '%s' 이 올바르지 않아 1로 설정합니다.", args.n_jobs)
             search_cfg["n_jobs"] = 1
 
+    if args.dataset_jobs is not None:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        try:
+            search_cfg["dataset_jobs"] = max(1, int(args.dataset_jobs))
+        except (TypeError, ValueError):
+            LOGGER.warning(
+                "--dataset-jobs 값 '%s' 이 올바르지 않아 1로 설정합니다.",
+                args.dataset_jobs,
+            )
+            search_cfg["dataset_jobs"] = 1
+
+    if args.dataset_executor:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        search_cfg["dataset_executor"] = args.dataset_executor
+
+    if args.dataset_start_method:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        search_cfg["dataset_start_method"] = args.dataset_start_method
+
+    if args.stop_local_time:
+        search_cfg = _ensure_dict(params_cfg, "search")
+        search_cfg["stop_local_time"] = args.stop_local_time
+
     if args.study_name:
         search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["study_name"] = args.study_name
@@ -1383,6 +1560,7 @@ def _execute_single(
         search_cfg["pruner"] = args.pruner
 
     forced_params: Dict[str, object] = dict(params_cfg.get("overrides", {}))
+    auto_workers = bool(getattr(args, "auto_workers", False))
     for name in _collect_tokens(args.enable):
         forced_params[name] = True
     for name in _collect_tokens(args.disable):
@@ -1456,6 +1634,19 @@ def _execute_single(
         risk_cfg["qty_pct"] = args.qty_pct
         backtest_risk["qty_pct"] = args.qty_pct
 
+    def _apply_simple_metrics(decision: bool) -> None:
+        forced_params["simpleMetricsOnly"] = decision
+        forced_params["simpleProfitOnly"] = decision
+        risk_cfg["simpleMetricsOnly"] = decision
+        risk_cfg["simpleProfitOnly"] = decision
+        backtest_risk["simpleMetricsOnly"] = decision
+        backtest_risk["simpleProfitOnly"] = decision
+
+    if getattr(args, "simple_metrics", False) or getattr(args, "simple_profit", False):
+        _apply_simple_metrics(True)
+    elif getattr(args, "no_simple_metrics", False):
+        _apply_simple_metrics(False)
+
     if args.interactive:
         leverage_default = risk_cfg.get("leverage")
         qty_default = risk_cfg.get("qty_pct")
@@ -1483,9 +1674,59 @@ def _execute_single(
             if decision is not None:
                 forced_params[name] = decision
 
+        simple_default: Optional[bool] = None
+        for candidate in (
+            forced_params.get("simpleMetricsOnly"),
+            forced_params.get("simpleProfitOnly"),
+            risk_cfg.get("simpleMetricsOnly"),
+            risk_cfg.get("simpleProfitOnly"),
+            backtest_risk.get("simpleMetricsOnly"),
+            backtest_risk.get("simpleProfitOnly"),
+        ):
+            coerced = _coerce_bool_or_none(candidate)
+            if coerced is not None:
+                simple_default = coerced
+                break
+        decision = _prompt_bool(
+            "단순 ProfitFactor 전용 지표 경로 사용", simple_default
+        )
+        if decision is not None:
+            _apply_simple_metrics(decision)
+
+    params_cfg["overrides"] = forced_params
+
     datasets = prepare_datasets(params_cfg, backtest_cfg, args.data)
     if not datasets:
         raise RuntimeError("No datasets prepared for optimisation")
+
+    if auto_workers:
+        available_cpu = max(multiprocessing.cpu_count(), 1)
+        search_cfg = _ensure_dict(params_cfg, "search")
+        current_n_jobs = int(search_cfg.get("n_jobs", 1) or 1)
+        if current_n_jobs <= 1 and available_cpu > 1:
+            recommended_trials = min(available_cpu, max(2, available_cpu // 2))
+            if recommended_trials > 1:
+                search_cfg["n_jobs"] = recommended_trials
+                LOGGER.info(
+                    "Auto workers: Optuna n_jobs=%d (available CPU=%d)",
+                    recommended_trials,
+                    available_cpu,
+                )
+        dataset_jobs_current = int(search_cfg.get("dataset_jobs", 1) or 1)
+        if len(datasets) > 1 and available_cpu > current_n_jobs and dataset_jobs_current <= 1:
+            max_parallel = max(
+                1,
+                min(len(datasets), max(1, available_cpu // max(1, search_cfg.get("n_jobs", 1)))),
+            )
+            if max_parallel > 1:
+                search_cfg["dataset_jobs"] = max_parallel
+                LOGGER.info(
+                    "Auto workers: dataset_jobs=%d (datasets=%d, CPU=%d)",
+                    max_parallel,
+                    len(datasets),
+                    available_cpu,
+                )
+
 
     output_dir, tag_info = _resolve_output_directory(args.output, datasets, params_cfg, args.run_tag)
     _configure_logging(output_dir / "logs")

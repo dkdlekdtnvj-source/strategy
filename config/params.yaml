@@ -32,6 +32,7 @@ search:
   pruner: asha
   heartbeat_interval: 60
   heartbeat_grace_period: 120
+  stop_local_time: "18:00"
   multi_objective: false
   nsga_params:
     population_size: 120
