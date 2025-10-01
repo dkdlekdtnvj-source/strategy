@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 from collections.abc import Sequence as AbcSequence
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
@@ -22,7 +23,7 @@ import optuna.storages
 import pandas as pd
 import yaml
 import multiprocessing
-import ccxt  # 상위 50 심볼 조회용
+import ccxt
 
 from datafeed.cache import DataCache
 from optimize.metrics import (
@@ -60,6 +61,11 @@ def fetch_top_usdt_perp_symbols(
 
     exclude_symbols_set = set(exclude_symbols or [])
     exclude_keywords = list(exclude_keywords or [])
+    keyword_pattern = (
+        re.compile("|".join(re.escape(k) for k in exclude_keywords))
+        if exclude_keywords
+        else None
+    )
 
     rows: List[Tuple[str, float]] = []
     for sym, ticker in tickers.items():
@@ -72,12 +78,13 @@ def fetch_top_usdt_perp_symbols(
         unified = market.get("id", "")
         if unified in exclude_symbols_set:
             continue
-        if any(keyword in unified for keyword in exclude_keywords):
+        if keyword_pattern and keyword_pattern.search(unified):
             continue
 
         last = ticker.get("last")
-        if min_price is not None and (last is None or float(last) < float(min_price)):
-            continue
+        if min_price is not None:
+            if last is None or float(last) < float(min_price):
+                continue
 
         quote_volume = ticker.get("quoteVolume")
         if quote_volume is None:
@@ -2531,6 +2538,8 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
         else:
             print("\n[ERROR] --pick-top50 인덱스가 범위를 벗어났습니다 (1~50).")
             return
+    elif args.symbol:
+        selected_symbol = args.symbol.strip()
     else:
         print("\n[ERROR] 심볼이 지정되지 않았습니다.")
         print("   예) 상위50 출력:       python -m optimize.run --list-top50")
@@ -2540,6 +2549,7 @@ def execute(args: argparse.Namespace, argv: Optional[Sequence[str]] = None) -> N
 
     print(f"[INFO] 선택된 심볼: {selected_symbol}")
 
+    args.symbol = selected_symbol
     params_cfg["symbol"] = selected_symbol
     backtest_cfg["symbols"] = [selected_symbol]
 
