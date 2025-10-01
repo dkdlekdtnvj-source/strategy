@@ -65,18 +65,27 @@ def max_drawdown(equity: pd.Series) -> float:
 
 def sortino_ratio(returns: pd.Series, risk_free: float = 0.0) -> float:
     downside = returns[returns < risk_free]
+    if not downside.empty:
+        downside = downside.replace([np.inf, -np.inf], np.nan).dropna()
     if downside.empty:
         return float("inf")
-    expected = returns.mean() - risk_free
-    downside_std = downside.std(ddof=0)
-    return float(expected / downside_std) if downside_std != 0 else float("inf")
+    expected = returns.replace([np.inf, -np.inf], np.nan).dropna().mean() - risk_free
+    with np.errstate(invalid="ignore"):
+        downside_std = downside.std(ddof=0)
+    if downside_std == 0 or np.isnan(downside_std):
+        return float("inf")
+    return float(expected / downside_std)
 
 
 def sharpe_ratio(returns: pd.Series, risk_free: float = 0.0) -> float:
-    std = returns.std(ddof=0)
-    if std == 0:
+    cleaned = returns.replace([np.inf, -np.inf], np.nan).dropna()
+    if cleaned.empty:
         return float("inf")
-    return float((returns.mean() - risk_free) / std)
+    with np.errstate(invalid="ignore"):
+        std = cleaned.std(ddof=0)
+    if std == 0 or np.isnan(std):
+        return float("inf")
+    return float((cleaned.mean() - risk_free) / std)
 
 
 def profit_factor(trades: Iterable[Trade]) -> float:
@@ -121,21 +130,39 @@ def _weekly_returns(returns: pd.Series) -> pd.Series:
     return weekly.dropna()
 
 
-def aggregate_metrics(trades: List[Trade], returns: pd.Series) -> Dict[str, float]:
+def aggregate_metrics(
+    trades: List[Trade], returns: pd.Series, *, simple: bool = False
+) -> Dict[str, float]:
     """Aggregate trade-level information into rich performance metrics."""
 
-    returns = returns.fillna(0.0)
+    returns = returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
     equity = equity_curve_from_returns(returns, initial=1.0)
     net_profit = float((equity.iloc[-1] - equity.iloc[0]) / equity.iloc[0]) if len(equity) > 1 else 0.0
-
-    weekly = _weekly_returns(returns)
-    weekly_mean = float(weekly.mean()) if not weekly.empty else 0.0
-    weekly_std = float(weekly.std(ddof=0)) if len(weekly) > 1 else 0.0
 
     gross_profit = float(sum(max(trade.profit, 0.0) for trade in trades))
     gross_loss = float(sum(min(trade.profit, 0.0) for trade in trades))
     wins = sum(1 for trade in trades if trade.profit > 0)
     losses = sum(1 for trade in trades if trade.profit < 0)
+
+    if simple:
+        metrics: Dict[str, float] = {
+            "NetProfit": net_profit,
+            "TotalReturn": net_profit,
+            "ProfitFactor": float(profit_factor(trades)),
+            "Trades": float(len(trades)),
+            "Wins": float(wins),
+            "Losses": float(losses),
+            "GrossProfit": gross_profit,
+            "GrossLoss": gross_loss,
+            "AvgHoldBars": float(average_hold_time(trades)),
+            "MaxConsecutiveLosses": float(_consecutive_losses(trades)),
+            "WinRate": float(win_rate(trades)),
+        }
+        return metrics
+
+    weekly = _weekly_returns(returns)
+    weekly_mean = float(weekly.mean()) if not weekly.empty else 0.0
+    weekly_std = float(weekly.std(ddof=0)) if len(weekly) > 1 else 0.0
 
     metrics: Dict[str, float] = {
         "NetProfit": net_profit,
