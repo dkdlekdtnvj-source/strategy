@@ -2,10 +2,9 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import ccxt
 import pandas as pd
@@ -103,14 +102,14 @@ def save_dataframe(df: pd.DataFrame, path: Path) -> None:
     df.to_csv(path)
 
 
-def read_manifest(path: Path) -> Dict[str, any]:
+def read_manifest(path: Path) -> Dict[str, Any]:
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
-def write_manifest(path: Path, payload: Dict[str, any]) -> None:
+def write_manifest(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
