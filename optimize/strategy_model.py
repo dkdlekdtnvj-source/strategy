@@ -76,7 +76,7 @@ def _timeframe_to_offset(timeframe: str) -> Optional[str]:
     if not tf:
         return None
     if tf.endswith("m"):
-        return f"{int(tf[:-1])}T"
+        return f"{int(tf[:-1])}min"
     if tf.endswith("h"):
         return f"{int(tf[:-1])}H"
     if tf.endswith("D"):
@@ -84,7 +84,7 @@ def _timeframe_to_offset(timeframe: str) -> Optional[str]:
     if tf.endswith("W"):
         return f"{int(tf[:-1])}W"
     if tf.isdigit():
-        return f"{int(tf)}T"
+        return f"{int(tf)}min"
     return None
 
 
@@ -473,17 +473,23 @@ def run_backtest(
     debug_force_short = bool_param("debugForceShort", False)
     reentry_bars = int_param("reentryBars", 0)
 
-    use_session_filter = bool_param("useSessionFilter", False)
+    requested_session_filter = bool_param("useSessionFilter", False)
     session_utc = str_param("sessionUtc", "0000-2359")
-    use_day_filter = bool_param("useDayFilter", False)
+    if requested_session_filter:
+        LOGGER.warning("세션 필터 기능은 안정성 문제로 인해 현재 비활성화됩니다.")
+    use_session_filter = False
+    requested_day_filter = bool_param("useDayFilter", False)
+    if requested_day_filter:
+        LOGGER.warning("요일 필터 기능은 안정성 문제로 인해 현재 비활성화됩니다.")
+    use_day_filter = False
     day_flags = {
-        1: bool_param("monOk", True),
-        2: bool_param("tueOk", True),
-        3: bool_param("wedOk", True),
-        4: bool_param("thuOk", True),
-        5: bool_param("friOk", True),
-        6: bool_param("satOk", False),
-        7: bool_param("sunOk", False),
+        1: bool_param("monOk", True, enabled=requested_day_filter),
+        2: bool_param("tueOk", True, enabled=requested_day_filter),
+        3: bool_param("wedOk", True, enabled=requested_day_filter),
+        4: bool_param("thuOk", True, enabled=requested_day_filter),
+        5: bool_param("friOk", True, enabled=requested_day_filter),
+        6: bool_param("satOk", False, enabled=requested_day_filter),
+        7: bool_param("sunOk", False, enabled=requested_day_filter),
     }
 
     # 리스크/지갑 --------------------------------------------------------------------
@@ -533,6 +539,13 @@ def run_backtest(
     use_guard_exit = bool_param("useGuardExit", False)
     maintenance_margin_pct = float_param("maintenanceMarginPct", 0.5)
     preempt_ticks = int_param("preemptTicks", 8)
+
+    simple_metrics_only = (
+        bool_param("simpleMetricsOnly", False)
+        or bool_param("simpleProfitOnly", False)
+        or _coerce_bool(risk.get("simpleMetricsOnly"), False)
+        or _coerce_bool(risk.get("simpleProfitOnly"), False)
+    )
 
     use_volatility_guard = bool_param("useVolatilityGuard", False)
     volatility_lookback = int_param("volatilityLookback", 50, enabled=use_volatility_guard)
@@ -702,8 +715,9 @@ def run_backtest(
 
     gate_dev = mom_fade_dev
     gate_atr = mom_range
-    gate_sq_on = (gate_dev < gate_atr).fillna(False)
-    gate_sq_rel = gate_sq_on.shift().fillna(False) & (~gate_sq_on)
+    gate_sq_on = (gate_dev < gate_atr).fillna(False).astype(bool)
+    gate_sq_prev = gate_sq_on.shift(fill_value=False)
+    gate_sq_rel = gate_sq_prev & np.logical_not(gate_sq_on)
     gate_rel_idx = gate_sq_rel.cumsum()
     gate_rel_idx = gate_rel_idx.where(gate_sq_rel, np.nan).ffill()
     gate_bars_since_release = (df.index.to_series().groupby(gate_rel_idx).cumcount()).fillna(np.inf)
@@ -845,12 +859,20 @@ def run_backtest(
             bos_tf,
             lambda data: data["low"].rolling(bos_lookback, min_periods=bos_lookback).min(),
         )
-        bos_high_ref = bos_high.shift().fillna(bos_high)
-        bos_low_ref = bos_low.shift().fillna(bos_low)
-        bos_long_event = use_bos & (df["close"] > bos_high_ref)
-        bos_short_event = use_bos & (df["close"] < bos_low_ref)
-        bos_long_state = (~use_bos) | bos_long_event.rolling(bos_state_bars, min_periods=1).max().astype(bool)
-        bos_short_state = (~use_bos) | bos_short_event.rolling(bos_state_bars, min_periods=1).max().astype(bool)
+        bos_high_ref = bos_high.shift()
+        bos_low_ref = bos_low.shift()
+        if use_bos:
+            bos_long_event = (df["close"] > bos_high_ref).where(~bos_high_ref.isna(), True)
+            bos_short_event = (df["close"] < bos_low_ref).where(~bos_low_ref.isna(), True)
+            bos_long_state = (
+                bos_long_event.rolling(bos_state_bars, min_periods=1).max().fillna(True).astype(bool)
+            )
+            bos_short_state = (
+                bos_short_event.rolling(bos_state_bars, min_periods=1).max().fillna(True).astype(bool)
+            )
+        else:
+            bos_long_state = pd.Series(True, index=df.index)
+            bos_short_state = pd.Series(True, index=df.index)
 
         pivot_high_ctx = _security_series(
             df,
@@ -862,10 +884,18 @@ def run_backtest(
             bos_tf,
             lambda data: _pivot_series(data["low"], pivot_left, pivot_right, False),
         )
-        choch_long_event = use_choch & (df["close"] > pivot_high_ctx)
-        choch_short_event = use_choch & (df["close"] < pivot_low_ctx)
-        choch_long_state = (~use_choch) | choch_long_event.rolling(choch_state_bars, min_periods=1).max().astype(bool)
-        choch_short_state = (~use_choch) | choch_short_event.rolling(choch_state_bars, min_periods=1).max().astype(bool)
+        if use_choch:
+            choch_long_event = (df["close"] > pivot_high_ctx).where(~pivot_high_ctx.isna(), True)
+            choch_short_event = (df["close"] < pivot_low_ctx).where(~pivot_low_ctx.isna(), True)
+            choch_long_state = (
+                choch_long_event.rolling(choch_state_bars, min_periods=1).max().fillna(True).astype(bool)
+            )
+            choch_short_state = (
+                choch_short_event.rolling(choch_state_bars, min_periods=1).max().fillna(True).astype(bool)
+            )
+        else:
+            choch_long_state = pd.Series(True, index=df.index)
+            choch_short_state = pd.Series(True, index=df.index)
     else:
         bos_long_state = pd.Series(True, index=df.index)
         bos_short_state = pd.Series(True, index=df.index)
@@ -1514,7 +1544,7 @@ def run_backtest(
     if position.direction != 0 and position.entry_time is not None:
         close_position(df.index[-1], df.iloc[-1]["close"], "EndOfData")
 
-    metrics = aggregate_metrics(trades, returns_series)
+    metrics = aggregate_metrics(trades, returns_series, simple=simple_metrics_only)
     metrics["FinalEquity"] = state.equity
     metrics["NetProfitAbs"] = state.net_profit
     metrics["GuardFrozen"] = float(guard_frozen)
