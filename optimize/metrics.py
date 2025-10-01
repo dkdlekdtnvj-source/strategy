@@ -8,6 +8,9 @@ import numpy as np
 import pandas as pd
 
 
+EPS = 1e-12
+
+
 @dataclass
 class Trade:
     """Container describing the outcome of a single trade."""
@@ -68,30 +71,31 @@ def sortino_ratio(returns: pd.Series, risk_free: float = 0.0) -> float:
     if not downside.empty:
         downside = downside.replace([np.inf, -np.inf], np.nan).dropna()
     if downside.empty:
-        return float("inf")
+        return 0.0
     expected = returns.replace([np.inf, -np.inf], np.nan).dropna().mean() - risk_free
     with np.errstate(invalid="ignore"):
         downside_std = downside.std(ddof=0)
     if downside_std == 0 or np.isnan(downside_std):
-        return float("inf")
+        return 0.0
     return float(expected / downside_std)
 
 
 def sharpe_ratio(returns: pd.Series, risk_free: float = 0.0) -> float:
     cleaned = returns.replace([np.inf, -np.inf], np.nan).dropna()
     if cleaned.empty:
-        return float("inf")
+        return 0.0
     with np.errstate(invalid="ignore"):
         std = cleaned.std(ddof=0)
     if std == 0 or np.isnan(std):
-        return float("inf")
+        return 0.0
     return float((cleaned.mean() - risk_free) / std)
 
 
 def profit_factor(trades: Iterable[Trade]) -> float:
     gross_profit = sum(max(trade.profit, 0.0) for trade in trades)
     gross_loss = sum(min(trade.profit, 0.0) for trade in trades)
-    return float(gross_profit / abs(gross_loss)) if gross_loss else float("inf")
+    denominator = max(abs(gross_loss), EPS)
+    return float(gross_profit / denominator)
 
 
 def win_rate(trades: Sequence[Trade]) -> float:
@@ -144,6 +148,8 @@ def aggregate_metrics(
     wins = sum(1 for trade in trades if trade.profit > 0)
     losses = sum(1 for trade in trades if trade.profit < 0)
 
+    fallback_keys = ("ProfitFactor", "Sortino", "Sharpe")
+
     if simple:
         metrics: Dict[str, float] = {
             "NetProfit": net_profit,
@@ -158,6 +164,9 @@ def aggregate_metrics(
             "MaxConsecutiveLosses": float(_consecutive_losses(trades)),
             "WinRate": float(win_rate(trades)),
         }
+        for key in fallback_keys:
+            if key in metrics and not np.isfinite(metrics[key]):
+                metrics[key] = 0.0
         return metrics
 
     weekly = _weekly_returns(returns)
@@ -189,6 +198,9 @@ def aggregate_metrics(
     mae = [trade.mae for trade in trades]
     metrics["AvgMFE"] = float(np.mean(mfe)) if mfe else 0.0
     metrics["AvgMAE"] = float(np.mean(mae)) if mae else 0.0
+    for key in fallback_keys:
+        if key in metrics and not np.isfinite(metrics[key]):
+            metrics[key] = 0.0
     return metrics
 
 
