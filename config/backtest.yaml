@@ -1,30 +1,82 @@
-futures: true
-symbols:
-  - "BINANCE:ENAUSDT"
-  - "BINANCE:ETHUSDT"
-  - "BINANCE:BTCUSDT"
-  - "BINANCE:SOLUSDT"
-  - "BINANCE:XPLUSDT"
-  - "BINANCE:ASTERUSDT"
-  - "BINANCE:DOGEUSDT"
-  - "BINANCE:XRPUSDT"
-  - "BINANCE:SUIUSDT"
-timeframes:
-  - "1m"
-  - "3m"
-  - "5m"
-htf_timeframes:
-  - "15m"
-  - "1h"
-periods:
-  - {from: "2024-01-01", to: "2025-09-25"}
-fees:
-  commission_pct: 0.0005
-  slippage_ticks: 2
-risk:
-  leverage: 10
-  qty_pct: 30
-  liq_buffer_pct: 0.5
+version: 1
+timezone: Asia/Seoul
+
+data:
+  exchange: binance
+  market: futures
+  ohlcv_limit: 1500
+  cache_dir: data
+  max_retries: 5
+  retry_wait_secs: 2
+
+datasets:
+  - symbol: BINANCE:ENAUSDT
+    ltf:   [1m, 3m, 5m]
+    htf:   [15m, 1h]
+    start: 2024-01-01
+    end:   2025-09-25
+
+  - symbol: BINANCE:ETHUSDT
+    ltf:   [1m, 3m, 5m]
+    htf:   [15m, 1h]
+    start: 2024-01-01
+    end:   2025-09-25
+
+  - symbol: BINANCE:BTCUSDT
+    ltf:   [1m, 3m, 5m]
+    htf:   [15m, 1h]
+    start: 2024-01-01
+    end:   2025-09-25
+
+  - symbol: BINANCE:SOLUSDT
+    ltf:   [1m, 3m, 5m]
+    htf:   [15m, 1h]
+    start: 2024-01-01
+    end:   2025-09-25
+
+  - symbol: BINANCE:XPLUSDT
+    ltf:   [1m, 3m, 5m]
+    htf:   [15m, 1h]
+    start: 2024-01-01
+    end:   2025-09-25
+
+  - symbol: BINANCE:ASTERUSDT
+    ltf:   [1m, 3m, 5m]
+    htf:   [15m, 1h]
+    start: 2024-01-01
+    end:   2025-09-25
+
+  - symbol: BINANCE:DOGEUSDT
+    ltf:   [1m, 3m, 5m]
+    htf:   [15m, 1h]
+    start: 2024-01-01
+    end:   2025-09-25
+
+  - symbol: BINANCE:XRPUSDT
+    ltf:   [1m, 3m, 5m]
+    htf:   [15m, 1h]
+    start: 2024-01-01
+    end:   2025-09-25
+
+  - symbol: BINANCE:SUIUSDT
+    ltf:   [1m, 3m, 5m]
+    htf:   [15m, 1h]
+    start: 2024-01-01
+    end:   2025-09-25
+
+walk_forward:
+  train_bars: 100000   # ~69일
+  test_bars:  30000    # ~21일
+  step:       30000
+  min_trades: 12
+
+report:
+  out_dir: reports
+  save_csv: true
+  save_best_json: true
+  save_heatmap: true
+  rank_by: ProfitFactor
+
 symbol_aliases:
-  "BINANCE:XPLUSDT": "BINANCE:XPLAUSDT"
-  "BINANCE:ASTERUSDT": "BINANCE:ASTRUSDT"
+  BINANCE:XPLUSDT: BINANCE:XPLAUSDT
+  BINANCE:ASTERUSDT: BINANCE:ASTRUSDT
