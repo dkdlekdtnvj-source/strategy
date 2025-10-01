@@ -1,7 +1,13 @@
 import math
 
+import numpy as np
 import pandas as pd
 import pytest
+
+pytest.importorskip("optuna", reason="optimize.run 모듈은 optuna 의존성을 필요로 합니다.")
+pytest.importorskip("ccxt", reason="데이터 캐시 초기화에는 ccxt 의존성이 필요합니다.")
+pytest.importorskip("matplotlib", reason="리포트 모듈은 matplotlib 을 요구합니다.")
+pytest.importorskip("seaborn", reason="리포트 모듈은 seaborn 을 요구합니다.")
 
 from optimize.metrics import (
     ObjectiveSpec,
@@ -117,6 +123,111 @@ def test_run_backtest_deterministic():
     assert first["Trades"] == second["Trades"]
     assert first["NetProfit"] == second["NetProfit"]
     assert first["Valid"] == second["Valid"]
+
+
+def test_run_backtest_injects_penalty_settings():
+    data = pd.read_csv("tests/tests_data/sample_ohlcv.csv", parse_dates=["timestamp"], index_col="timestamp")
+    params = _base_params(
+        useDynamicThresh=False,
+        useSymThreshold=True,
+        holdPenalty="4.5",
+        consecutiveLossPenalty=6.0,
+    )
+    fees = {"commission_pct": 0.0, "slippage_ticks": 0}
+    risk = {
+        "leverage": 1,
+        "qty_pct": 5,
+        "min_trades": "7",
+        "min_hold_bars": "3",
+        "max_consecutive_losses": "4",
+        "penalty_trade": "2.5",
+    }
+
+    metrics = run_backtest(data, params, fees, risk)
+
+    assert metrics["TradePenalty"] == pytest.approx(2.5)
+    assert metrics["HoldPenalty"] == pytest.approx(4.5)
+    assert metrics["ConsecutiveLossPenalty"] == pytest.approx(6.0)
+    assert metrics["MinTrades"] == pytest.approx(7.0)
+    assert metrics["MinHoldBars"] == pytest.approx(3.0)
+    assert metrics["MaxConsecutiveLossLimit"] == pytest.approx(4.0)
+
+
+def test_run_backtest_clamps_negative_penalties():
+    data = pd.read_csv("tests/tests_data/sample_ohlcv.csv", parse_dates=["timestamp"], index_col="timestamp")
+    params = _base_params(
+        holdPenalty=-3.0,
+        consecutiveLossPenalty="-8.0",
+    )
+    fees = {"commission_pct": 0.0, "slippage_ticks": 0}
+    risk = {
+        "leverage": 1,
+        "qty_pct": 5,
+        "min_trades": 1,
+        "min_hold_bars": 0,
+        "max_consecutive_losses": 5,
+        "penalty_trade": -2.0,
+    }
+
+    metrics = run_backtest(data, params, fees, risk)
+
+    assert metrics["TradePenalty"] >= 0
+    assert metrics["HoldPenalty"] >= 0
+    assert metrics["ConsecutiveLossPenalty"] >= 0
+
+
+def test_run_backtest_handles_nan_risk_values():
+    data = pd.read_csv("tests/tests_data/sample_ohlcv.csv", parse_dates=["timestamp"], index_col="timestamp")
+    params = _base_params(
+        useDynamicThresh=False,
+        useSymThreshold=True,
+        minTrades="4",
+        minHoldBars="2",
+        maxConsecutiveLosses="3",
+        penaltyTrade="3.0",
+        holdPenalty="5.5",
+        consecutiveLossPenalty="7.0",
+    )
+    fees = {"commission_pct": 0.0, "slippage_ticks": 0}
+    risk = {
+        "leverage": 1,
+        "qty_pct": "nan",
+        "liq_buffer_pct": "nan",
+        "min_trades": "nan",
+        "min_hold_bars": "nan",
+        "max_consecutive_losses": "nan",
+        "penalty_trade": "nan",
+    }
+
+    metrics = run_backtest(data, params, fees, risk)
+
+    assert metrics["MinTrades"] == pytest.approx(4.0)
+    assert metrics["MinHoldBars"] == pytest.approx(2.0)
+    assert metrics["MaxConsecutiveLossLimit"] == pytest.approx(3.0)
+    assert metrics["TradePenalty"] == pytest.approx(3.0)
+    assert metrics["HoldPenalty"] == pytest.approx(5.5)
+    assert metrics["ConsecutiveLossPenalty"] == pytest.approx(7.0)
+    assert metrics["Trades"] >= 0
+    assert np.isfinite(metrics["TradePenalty"])
+
+
+def test_run_backtest_defaults_missing_penalties_to_zero():
+    data = pd.read_csv("tests/tests_data/sample_ohlcv.csv", parse_dates=["timestamp"], index_col="timestamp")
+    params = _base_params(useDynamicThresh=False, useSymThreshold=True)
+    fees = {"commission_pct": 0.0, "slippage_ticks": 0}
+    risk = {
+        "leverage": 1,
+        "qty_pct": 5,
+        "min_trades": 2,
+        "min_hold_bars": 1,
+        "max_consecutive_losses": 3,
+    }
+
+    metrics = run_backtest(data, params, fees, risk)
+
+    assert metrics["TradePenalty"] == pytest.approx(0.0)
+    assert metrics["HoldPenalty"] == pytest.approx(0.0)
+    assert metrics["ConsecutiveLossPenalty"] == pytest.approx(0.0)
 
 
 def test_event_filter_blocks_trades():
@@ -293,3 +404,47 @@ def test_combine_metrics_respects_series_length():
     assert combined["Trades"] == expected["Trades"]
     assert combined["NetProfit"] == pytest.approx(expected["NetProfit"])
     assert combined["Sortino"] == pytest.approx(expected["Sortino"])
+
+
+def test_combine_metrics_preserves_penalty_metadata():
+    base = aggregate_metrics([], pd.Series(dtype=float))
+    base["Returns"] = pd.Series(dtype=float)
+    base["TradesList"] = []
+    base["Valid"] = True
+
+    secondary = aggregate_metrics([], pd.Series(dtype=float))
+    secondary["Returns"] = pd.Series(dtype=float)
+    secondary["TradesList"] = []
+    secondary.update(
+        {
+            "MinTrades": 4.0,
+            "MinHoldBars": 2.0,
+            "MaxConsecutiveLossLimit": 3.0,
+            "TradePenalty": 2.0,
+            "HoldPenalty": 1.5,
+            "ConsecutiveLossPenalty": 0.75,
+            "Valid": True,
+        }
+    )
+
+    combined = combine_metrics([base, secondary])
+
+    assert combined["MinTrades"] == pytest.approx(4.0)
+    assert combined["MinHoldBars"] == pytest.approx(2.0)
+    assert combined["MaxConsecutiveLossLimit"] == pytest.approx(3.0)
+    assert combined["TradePenalty"] == pytest.approx(2.0)
+    assert combined["HoldPenalty"] == pytest.approx(1.5)
+    assert combined["ConsecutiveLossPenalty"] == pytest.approx(0.75)
+
+
+def test_combine_metrics_defaults_missing_penalties_to_zero():
+    base = aggregate_metrics([], pd.Series(dtype=float))
+    base["Returns"] = pd.Series(dtype=float)
+    base["TradesList"] = []
+    base["Valid"] = True
+
+    combined = combine_metrics([base])
+
+    assert combined["TradePenalty"] == pytest.approx(0.0)
+    assert combined["HoldPenalty"] == pytest.approx(0.0)
+    assert combined["ConsecutiveLossPenalty"] == pytest.approx(0.0)
