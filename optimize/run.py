@@ -729,17 +729,31 @@ def combine_metrics(metric_list: List[Dict[str, float]]) -> Dict[str, float]:
     aggregated["Wins"] = int(aggregated.get("Wins", 0))
     aggregated["Losses"] = int(aggregated.get("Losses", 0))
 
-    base = metric_list[0]
-    for key in [
-        "MinTrades",
-        "MinHoldBars",
-        "MaxConsecutiveLossLimit",
-        "TradePenalty",
-        "HoldPenalty",
-        "ConsecutiveLossPenalty",
-    ]:
-        if key in base:
-            aggregated[key] = float(base[key])
+    def _first_finite_value(key: str) -> Optional[float]:
+        for metrics in metric_list:
+            if key not in metrics:
+                continue
+            try:
+                value = float(metrics[key])
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(value):
+                continue
+            return float(value)
+        return None
+
+    penalty_keys = {"TradePenalty", "HoldPenalty", "ConsecutiveLossPenalty"}
+    requirement_keys = {"MinTrades", "MinHoldBars", "MaxConsecutiveLossLimit"}
+
+    for key in sorted(penalty_keys | requirement_keys):
+        value = _first_finite_value(key)
+        if value is None:
+            if key in penalty_keys or key in requirement_keys:
+                aggregated.setdefault(key, 0.0)
+            continue
+        if key in penalty_keys:
+            value = abs(value)
+        aggregated[key] = float(max(0.0, value))
 
     aggregated["Valid"] = all(m.get("Valid", True) for m in metric_list)
     return aggregated

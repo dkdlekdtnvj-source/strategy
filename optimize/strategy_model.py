@@ -432,6 +432,79 @@ def run_backtest(
         except (TypeError, ValueError):
             return float(default)
 
+    def _coerce_float_value(value: object, default: float) -> float:
+        """임의의 값을 ``float`` 로 강제 변환합니다."""
+
+        if value is None:
+            return float(default)
+        if isinstance(value, bool):
+            return float(int(value))
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _resolve_penalty_value(*names: str, default: float) -> float:
+        fallback = float(default)
+        if not np.isfinite(fallback) or fallback < 0:
+            fallback = 1.0
+        for source in (risk, params):
+            if not isinstance(source, dict):
+                continue
+            for name in names:
+                if name not in source or source[name] is None:
+                    continue
+                candidate = _coerce_float_value(source[name], fallback)
+                if not np.isfinite(candidate):
+                    continue
+                return float(abs(candidate))
+        return abs(fallback)
+
+    def _resolve_requirement_value(*names: str, default: float) -> float:
+        fallback = float(default)
+        if not np.isfinite(fallback):
+            fallback = 0.0
+        for source in (risk, params):
+            if not isinstance(source, dict):
+                continue
+            for name in names:
+                if name not in source or source[name] is None:
+                    continue
+                candidate = _coerce_float_value(source[name], fallback)
+                if np.isfinite(candidate):
+                    return float(candidate)
+        return fallback
+
+    def _apply_penalty_settings(
+        target: Dict[str, float],
+        *,
+        min_trades_value: float,
+        min_hold_value: float,
+        max_loss_streak: float,
+    ) -> None:
+        target["MinTrades"] = float(max(0.0, min_trades_value))
+        target["MinHoldBars"] = float(max(0.0, min_hold_value))
+        target["MaxConsecutiveLossLimit"] = float(max(0.0, max_loss_streak))
+
+        penalty_specs = {
+            "TradePenalty": (("penalty_trade", "penaltyTrade", "tradePenalty"), 0.0),
+            "HoldPenalty": (("penalty_hold", "penaltyHold", "holdPenalty"), 0.0),
+            "ConsecutiveLossPenalty": (
+                (
+                    "penalty_consecutive_loss",
+                    "penaltyConsecutiveLoss",
+                    "consecutiveLossPenalty",
+                ),
+                0.0,
+            ),
+        }
+
+        for key, (names, default_value) in penalty_specs.items():
+            resolved = _resolve_penalty_value(*names, default=default_value)
+            if not np.isfinite(resolved):
+                resolved = default_value
+            target[key] = float(max(0.0, resolved))
+
     def str_param(name: str, default: str, *, enabled: bool = True) -> str:
         if not enabled:
             return str(default)
@@ -473,27 +546,22 @@ def run_backtest(
     debug_force_short = bool_param("debugForceShort", False)
     reentry_bars = int_param("reentryBars", 0)
 
-    requested_session_filter = bool_param("useSessionFilter", False)
-    session_utc = str_param("sessionUtc", "0000-2359")
-    if requested_session_filter:
+    if bool_param("useSessionFilter", False):
         LOGGER.warning("세션 필터 기능은 안정성 문제로 인해 현재 비활성화됩니다.")
-    use_session_filter = False
-    requested_day_filter = bool_param("useDayFilter", False)
-    if requested_day_filter:
+    if bool_param("useDayFilter", False):
         LOGGER.warning("요일 필터 기능은 안정성 문제로 인해 현재 비활성화됩니다.")
-    use_day_filter = False
-    day_flags = {
-        1: bool_param("monOk", True, enabled=requested_day_filter),
-        2: bool_param("tueOk", True, enabled=requested_day_filter),
-        3: bool_param("wedOk", True, enabled=requested_day_filter),
-        4: bool_param("thuOk", True, enabled=requested_day_filter),
-        5: bool_param("friOk", True, enabled=requested_day_filter),
-        6: bool_param("satOk", False, enabled=requested_day_filter),
-        7: bool_param("sunOk", False, enabled=requested_day_filter),
-    }
+    if bool_param("useEventFilter", False):
+        LOGGER.warning("이벤트 필터 기능은 안정성 문제로 인해 현재 비활성화됩니다.")
 
     # 리스크/지갑 --------------------------------------------------------------------
     base_qty_percent = float_param("baseQtyPercent", 30.0)
+    qty_override = risk.get("qty_pct")
+    if qty_override is None:
+        qty_override = risk.get("qtyPercent")
+    if qty_override is not None:
+        resolved_qty = _coerce_float_value(qty_override, base_qty_percent)
+        if np.isfinite(resolved_qty):
+            base_qty_percent = resolved_qty
     use_sizing_override = bool_param("useSizingOverride", False)
     sizing_mode = str_param("sizingMode", "자본 비율")
     advanced_percent = float_param("advancedPercent", 25.0, enabled=use_sizing_override)
@@ -521,7 +589,23 @@ def run_backtest(
     par_cold_mult = float_param("parColdRiskMult", 0.35, enabled=use_perf_adaptive_risk)
     par_pause_on_cold = bool_param("parPauseOnCold", True, enabled=use_perf_adaptive_risk)
 
-    min_trades_req = int(risk.get("min_trades", min_trades if min_trades is not None else 0))
+    min_trades_default = (
+        _coerce_float_value(min_trades, 0.0)
+        if min_trades is not None
+        else _coerce_float_value(params.get("minTrades"), 0.0)
+    )
+    if not np.isfinite(min_trades_default):
+        min_trades_default = 0.0
+    min_trades_value = _resolve_requirement_value(
+        "min_trades",
+        "minTrades",
+        "minTradesReq",
+        default=min_trades_default,
+    )
+    try:
+        min_trades_req = max(0, int(float(min_trades_value)))
+    except (TypeError, ValueError, OverflowError):
+        min_trades_req = max(0, int(min_trades_default))
 
     use_daily_loss_guard = bool_param("useDailyLossGuard", False)
     daily_loss_limit = float_param("dailyLossLimit", 80.0)
@@ -530,7 +614,17 @@ def run_backtest(
     use_weekly_profit_lock = bool_param("useWeeklyProfitLock", False)
     weekly_profit_target = float_param("weeklyProfitTarget", 250.0)
     use_loss_streak_guard = bool_param("useLossStreakGuard", False)
-    max_consecutive_losses = int_param("maxConsecutiveLosses", 3)
+    max_consecutive_loss_default = int_param("maxConsecutiveLosses", 3)
+    max_consecutive_value = _resolve_requirement_value(
+        "max_consecutive_losses",
+        "maxConsecutiveLosses",
+        "maxLossStreak",
+        default=float(max_consecutive_loss_default),
+    )
+    try:
+        max_consecutive_losses = max(0, int(float(max_consecutive_value)))
+    except (TypeError, ValueError, OverflowError):
+        max_consecutive_losses = max(0, int(max_consecutive_loss_default))
     use_capital_guard = bool_param("useCapitalGuard", False)
     capital_guard_pct = float_param("capitalGuardPct", 20.0)
     max_daily_losses = int_param("maxDailyLosses", 0)
@@ -539,6 +633,10 @@ def run_backtest(
     use_guard_exit = bool_param("useGuardExit", False)
     maintenance_margin_pct = float_param("maintenanceMarginPct", 0.5)
     preempt_ticks = int_param("preemptTicks", 8)
+    liq_buffer_raw = _coerce_float_value(risk.get("liq_buffer_pct"), 0.0)
+    if not np.isfinite(liq_buffer_raw):
+        liq_buffer_raw = 0.0
+    liq_buffer_pct = max(liq_buffer_raw, 0.0)
 
     simple_metrics_only = (
         bool_param("simpleMetricsOnly", False)
@@ -580,7 +678,7 @@ def run_backtest(
     range_tf = str_param("rangeTf", "5", enabled=use_range_filter)
     range_bars = int_param("rangeBars", 20, enabled=use_range_filter)
     range_percent = float_param("rangePercent", 1.0, enabled=use_range_filter)
-    use_event_filter = bool_param("useEventFilter", False)
+    use_event_filter = False  # 이벤트 필터는 안정성 문제로 비활성화
 
     use_regime_filter = bool_param("useRegimeFilter", False)
     ctx_htf_tf = str_param("ctxHtfTf", "240", enabled=use_regime_filter)
@@ -649,7 +747,19 @@ def run_backtest(
     max_stop_atr_mult = float_param("maxStopAtrMult", 2.8, enabled=use_stop_distance_guard)
     use_time_stop = bool_param("useTimeStop", False)
     max_hold_bars = int_param("maxHoldBars", 45, enabled=use_time_stop)
-    min_hold_bars_param = int(risk.get("min_hold_bars", params.get("minHoldBars", 0)))
+    min_hold_default = _coerce_float_value(params.get("minHoldBars"), 0.0)
+    if not np.isfinite(min_hold_default):
+        min_hold_default = 0.0
+    min_hold_value = _resolve_requirement_value(
+        "min_hold_bars",
+        "minHoldBars",
+        "minHold",
+        default=min_hold_default,
+    )
+    try:
+        min_hold_bars_param = max(0, int(float(min_hold_value)))
+    except (TypeError, ValueError, OverflowError):
+        min_hold_bars_param = max(0, int(min_hold_default))
     use_kasa = bool_param("useKASA", False)
     kasa_rsi_len = int_param("kasa_rsiLen", 14, enabled=use_kasa)
     kasa_rsi_ob = float_param("kasa_rsiOB", 72.0, enabled=use_kasa)
@@ -1090,21 +1200,6 @@ def run_backtest(
 
         row = df.iloc[idx]
 
-        session_allowed = True
-        if use_session_filter:
-            start_str, end_str = session_utc.split("-")
-            start_minutes = int(start_str[:2]) * 60 + int(start_str[2:])
-            end_minutes = int(end_str[:2]) * 60 + int(end_str[2:])
-            current_minutes = ts.tz_convert("UTC").hour * 60 + ts.tz_convert("UTC").minute if ts.tzinfo else ts.tz_localize("UTC").hour * 60 + ts.tz_localize("UTC").minute
-            if start_minutes <= end_minutes:
-                session_allowed = start_minutes <= current_minutes <= end_minutes
-            else:
-                session_allowed = current_minutes >= start_minutes or current_minutes <= end_minutes
-
-        day_allowed = True
-        if use_day_filter:
-            day_allowed = day_flags.get(ts.isoweekday(), False)
-
         if idx > 0:
             prev_day = df.index[idx - 1].date()
             if ts.date() != prev_day:
@@ -1190,6 +1285,12 @@ def run_backtest(
                 maint_margin = (qty * entry_price) * (maintenance_margin_pct / 100.0)
                 offset = (initial_margin - maint_margin) / qty if qty > 0 else 0.0
                 liq_price = entry_price - offset if position.direction > 0 else entry_price + offset
+                if liq_buffer_pct > 0:
+                    buffer = entry_price * (liq_buffer_pct / 100.0)
+                    if position.direction > 0:
+                        liq_price -= buffer
+                    else:
+                        liq_price += buffer
                 preempt_price = liq_price + preempt_ticks * tick_size if position.direction > 0 else liq_price - preempt_ticks * tick_size
                 hit_guard = row["low"] <= preempt_price if position.direction > 0 else row["high"] >= preempt_price
                 if hit_guard:
@@ -1197,7 +1298,7 @@ def run_backtest(
                     guard_frozen = True
                     guard_fired_total += 1
 
-        can_trade = session_allowed and day_allowed and not guard_frozen and is_vol_ok
+        can_trade = (not guard_frozen) and is_vol_ok
 
         if reentry_countdown > 0 and position.direction == 0:
             reentry_countdown -= 1
@@ -1551,14 +1652,17 @@ def run_backtest(
     metrics["TradesList"] = trades
     metrics["Returns"] = returns_series
     metrics["Withdrawable"] = state.withdrawable
+    _apply_penalty_settings(
+        metrics,
+        min_trades_value=min_trades_req,
+        min_hold_value=min_hold_bars_param,
+        max_loss_streak=max_consecutive_losses,
+    )
     metrics["Valid"] = (
         metrics.get("Trades", 0.0) >= min_trades_req
         and metrics.get("AvgHoldBars", 0.0) >= min_hold_bars_param
         and metrics.get("MaxConsecutiveLosses", 0.0) <= max_consecutive_losses
     )
-    metrics["MinTrades"] = float(min_trades_req)
-    metrics["MinHoldBars"] = float(min_hold_bars_param)
-    metrics["MaxConsecutiveLossLimit"] = float(max_consecutive_losses)
     return metrics
 
 
