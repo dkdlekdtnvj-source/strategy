@@ -5,9 +5,11 @@ import pytest
 
 from optimize.run import (
     DatasetSpec,
+    _filter_basic_factor_params,
     _group_datasets,
     _normalise_periods,
     _resolve_symbol_entry,
+    _restrict_to_basic_factors,
     _select_datasets_for_params,
     parse_args,
 )
@@ -66,6 +68,38 @@ def test_parse_args_accepts_trial_override():
     args = parse_args(["--n-trials", "25"])
 
     assert args.n_trials == 25
+
+
+def test_parse_args_exposes_space_flags():
+    args = parse_args(["--full-space"])
+
+    assert args.full_space is True
+    assert args.basic_factors_only is False
+
+    args = parse_args(["--basic-factors-only"])
+
+    assert args.full_space is False
+    assert args.basic_factors_only is True
+
+
+def test_basic_factor_filter_toggle():
+    space = {"oscLen": {"type": "int"}, "custom": {"type": "int"}}
+
+    restricted = _restrict_to_basic_factors(space)
+    assert restricted == {"oscLen": {"type": "int"}}
+
+    restored = _restrict_to_basic_factors(space, enabled=False)
+    assert restored == {"oscLen": {"type": "int"}, "custom": {"type": "int"}}
+
+
+def test_basic_factor_param_filter_toggle():
+    params = {"oscLen": 12, "custom": 7}
+
+    filtered = _filter_basic_factor_params(params)
+    assert filtered == {"oscLen": 12}
+
+    unfiltered = _filter_basic_factor_params(params, enabled=False)
+    assert unfiltered == params
 
 
 def _make_dataset(timeframe: str, htf: Optional[str]) -> DatasetSpec:

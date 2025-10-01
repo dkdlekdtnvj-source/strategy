@@ -448,3 +448,27 @@ def test_combine_metrics_defaults_missing_penalties_to_zero():
     assert combined["TradePenalty"] == pytest.approx(0.0)
     assert combined["HoldPenalty"] == pytest.approx(0.0)
     assert combined["ConsecutiveLossPenalty"] == pytest.approx(0.0)
+
+
+def test_combine_metrics_simple_override_forces_basic_profile():
+    idx = pd.date_range("2024-03-01", periods=5, freq="1H")
+    returns = pd.Series([0.01, -0.005, 0.007, 0.0, 0.012], index=idx)
+    metrics = {
+        "Returns": returns,
+        "GrossProfit": 180.0,
+        "GrossLoss": -90.0,
+        "Trades": 12,
+        "Wins": 7,
+        "Losses": 5,
+        "AvgHoldBars": 3.0,
+        "NetProfit": 0.08,
+        "Valid": True,
+    }
+
+    combined = combine_metrics([metrics], simple_override=True)
+
+    assert combined["SimpleMetricsOnly"] is True
+    assert combined["ProfitFactor"] == pytest.approx(2.0)
+    assert combined["Trades"] == 12
+    assert combined["WinRate"] == pytest.approx(7 / 12)
+    assert combined["Valid"] is True

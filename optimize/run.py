@@ -25,9 +25,11 @@ import multiprocessing
 
 from datafeed.cache import DataCache
 from optimize.metrics import (
+    EPS,
     ObjectiveSpec,
     Trade,
     aggregate_metrics,
+    equity_curve_from_returns,
     evaluate_objective_values,
     normalise_objectives,
     score_metrics,
@@ -113,11 +115,16 @@ def _space_hash(space: Dict[str, object]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _restrict_to_basic_factors(space: Dict[str, Dict[str, object]]) -> Dict[str, Dict[str, object]]:
+def _restrict_to_basic_factors(
+    space: Dict[str, Dict[str, object]], *, enabled: bool = True
+) -> Dict[str, Dict[str, object]]:
     """기본 팩터만 남긴 탐색 공간 사본을 반환합니다."""
 
     if not space:
         return {}
+
+    if not enabled:
+        return {name: dict(spec) for name, spec in space.items()}
 
     filtered: Dict[str, Dict[str, object]] = {}
     for name, spec in space.items():
@@ -126,11 +133,15 @@ def _restrict_to_basic_factors(space: Dict[str, Dict[str, object]]) -> Dict[str,
     return filtered
 
 
-def _filter_basic_factor_params(params: Dict[str, object]) -> Dict[str, object]:
+def _filter_basic_factor_params(
+    params: Dict[str, object], *, enabled: bool = True
+) -> Dict[str, object]:
     """기본 팩터 키만 남겨 파라미터 딕셔너리를 정리합니다."""
 
     if not params:
         return {}
+    if not enabled:
+        return dict(params)
     return {key: value for key, value in params.items() if key in BASIC_FACTOR_KEYS}
 
 
@@ -360,6 +371,8 @@ def _load_seed_trials(
     space_hash: str,
     regime_label: Optional[str] = None,
     max_seeds: int = 20,
+    *,
+    basic_filter_enabled: bool = True,
 ) -> List[Dict[str, object]]:
     if bank_path is None:
         return []
@@ -379,7 +392,9 @@ def _load_seed_trials(
         params = entry.get("params")
         if not isinstance(params, dict):
             continue
-        filtered_params = _filter_basic_factor_params(dict(params))
+        filtered_params = _filter_basic_factor_params(
+            dict(params), enabled=basic_filter_enabled
+        )
         if not filtered_params:
             continue
         seeds.append(filtered_params)
@@ -389,7 +404,9 @@ def _load_seed_trials(
             scale=float(payload.get("mutation_scale", 0.1)),
             rng=rng,
         )
-        mutated_filtered = _filter_basic_factor_params(mutated)
+        mutated_filtered = _filter_basic_factor_params(
+            mutated, enabled=basic_filter_enabled
+        )
         if mutated_filtered:
             seeds.append(mutated_filtered)
     return seeds
@@ -778,31 +795,163 @@ def prepare_datasets(
     return datasets
 
 
-def combine_metrics(metric_list: List[Dict[str, float]]) -> Dict[str, float]:
+def combine_metrics(
+    metric_list: List[Dict[str, float]], *, simple_override: Optional[bool] = None
+) -> Dict[str, float]:
     if not metric_list:
         return {}
 
-    combined_trades: List[Trade] = []
+    simple_mode = bool(simple_override)
+
+    if simple_override is None:
+        for metrics in metric_list:
+            if bool(metrics.get("SimpleMetricsOnly")):
+                simple_mode = True
+                break
+
     combined_returns: List[pd.Series] = []
-    simple_mode = False
+    combined_trades: List[Trade] = [] if not simple_mode else []
+
+    def _coerce_float(value: object) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    total_gross_profit = 0.0
+    total_gross_loss = 0.0
+    total_trades = 0
+    total_wins = 0
+    total_losses = 0
+    hold_weight_sum = 0.0
+    max_consecutive_losses = 0
+    valid_flag = True
 
     for metrics in metric_list:
         returns = metrics.get("Returns")
         if isinstance(returns, pd.Series):
             combined_returns.append(returns)
-        trades = metrics.get("TradesList")
-        if isinstance(trades, list):
-            combined_trades.extend(trades)
-        if not simple_mode and bool(metrics.get("SimpleMetricsOnly")):
-            simple_mode = True
 
-    merged_returns = pd.concat(combined_returns, axis=0) if combined_returns else pd.Series(dtype=float)
-    merged_returns = merged_returns.sort_index()
-    combined_trades.sort(key=lambda trade: (getattr(trade, "entry_time", None), getattr(trade, "exit_time", None)))
+        valid_flag = valid_flag and bool(metrics.get("Valid", True))
 
-    aggregated = aggregate_metrics(combined_trades, merged_returns, simple=simple_mode)
+        if simple_mode:
+            trades_count = int(_coerce_float(metrics.get("Trades")))
+            wins_count = int(_coerce_float(metrics.get("Wins")))
+            losses_count = int(_coerce_float(metrics.get("Losses")))
+            gross_profit = _coerce_float(metrics.get("GrossProfit"))
+            gross_loss = _coerce_float(metrics.get("GrossLoss"))
+            avg_hold = _coerce_float(metrics.get("AvgHoldBars"))
+            streak = int(_coerce_float(metrics.get("MaxConsecutiveLosses")))
+
+            trades_list = metrics.get("TradesList")
+            if isinstance(trades_list, list) and trades_list:
+                local_wins = 0
+                local_losses = 0
+                local_gross_profit = 0.0
+                local_gross_loss = 0.0
+                hold_sum = 0.0
+                current_streak = 0
+                worst_streak = 0
+                for trade in trades_list:
+                    profit = _coerce_float(getattr(trade, "profit", 0.0))
+                    if profit > 0:
+                        local_gross_profit += profit
+                        local_wins += 1
+                        current_streak = 0
+                    elif profit < 0:
+                        local_gross_loss += profit
+                        local_losses += 1
+                        current_streak += 1
+                        worst_streak = max(worst_streak, current_streak)
+                    else:
+                        current_streak = 0
+                    hold_sum += _coerce_float(getattr(trade, "bars_held", 0))
+
+                if trades_count == 0:
+                    trades_count = len(trades_list)
+                if wins_count == 0 and local_wins:
+                    wins_count = local_wins
+                if losses_count == 0 and local_losses:
+                    losses_count = local_losses
+                if gross_profit == 0.0 and local_gross_profit:
+                    gross_profit = local_gross_profit
+                if gross_loss == 0.0 and local_gross_loss:
+                    gross_loss = local_gross_loss
+                if avg_hold == 0.0 and trades_count:
+                    avg_hold = hold_sum / trades_count if trades_count else 0.0
+                if streak == 0 and worst_streak:
+                    streak = worst_streak
+
+            total_trades += trades_count
+            total_wins += wins_count
+            total_losses += losses_count
+            total_gross_profit += gross_profit
+            total_gross_loss += gross_loss
+            hold_weight_sum += avg_hold * trades_count
+            max_consecutive_losses = max(max_consecutive_losses, streak)
+        else:
+            trades = metrics.get("TradesList")
+            if isinstance(trades, list):
+                combined_trades.extend(trades)
+
+    merged_returns = (
+        pd.concat(combined_returns, axis=0).sort_index() if combined_returns else pd.Series(dtype=float)
+    )
+
     if simple_mode:
+        returns_clean = merged_returns.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+        if returns_clean.empty:
+            net_profit = 0.0
+        else:
+            equity = equity_curve_from_returns(returns_clean, initial=1.0)
+            net_profit = (
+                float((equity.iloc[-1] - equity.iloc[0]) / equity.iloc[0])
+                if len(equity) > 1
+                else 0.0
+            )
+        if returns_clean.empty and not net_profit:
+            fallback = [
+                metrics.get("NetProfit") if metrics.get("NetProfit") is not None else metrics.get("TotalReturn")
+                for metrics in metric_list
+            ]
+            fallback = [float(value) for value in fallback if value is not None]
+            if fallback:
+                net_profit = float(np.mean(fallback))
+
+        denominator = max(abs(total_gross_loss), EPS)
+        profit_factor_value = float(total_gross_profit / denominator) if denominator else 0.0
+        if not np.isfinite(profit_factor_value):
+            profit_factor_value = 0.0
+
+        if total_trades > 0 and hold_weight_sum > 0:
+            avg_hold = hold_weight_sum / total_trades
+        else:
+            avg_hold = 0.0
+
+        win_rate = float(total_wins / total_trades) if total_trades else 0.0
+
+        aggregated: Dict[str, float] = {
+            "NetProfit": net_profit,
+            "TotalReturn": net_profit,
+            "ProfitFactor": profit_factor_value,
+            "Trades": float(total_trades),
+            "Wins": float(total_wins),
+            "Losses": float(total_losses),
+            "GrossProfit": float(total_gross_profit),
+            "GrossLoss": float(total_gross_loss),
+            "AvgHoldBars": float(avg_hold),
+            "WinRate": win_rate,
+            "MaxConsecutiveLosses": float(max_consecutive_losses),
+        }
         aggregated["SimpleMetricsOnly"] = True
+    else:
+        combined_trades.sort(
+            key=lambda trade: (
+                getattr(trade, "entry_time", None),
+                getattr(trade, "exit_time", None),
+            )
+        )
+        aggregated = aggregate_metrics(combined_trades, merged_returns, simple=False)
 
     aggregated["Trades"] = int(aggregated.get("Trades", 0))
     aggregated["Wins"] = int(aggregated.get("Wins", 0))
@@ -834,7 +983,7 @@ def combine_metrics(metric_list: List[Dict[str, float]]) -> Dict[str, float]:
             value = abs(value)
         aggregated[key] = float(max(0.0, value))
 
-    aggregated["Valid"] = all(m.get("Valid", True) for m in metric_list)
+    aggregated["Valid"] = valid_flag
     return aggregated
 
 
@@ -887,19 +1036,30 @@ def optimisation_loop(
     multi_objective = bool(search_cfg.get("multi_objective", False)) and len(objective_specs) > 1
     directions = [spec.direction for spec in objective_specs]
     original_space = build_space(params_cfg.get("space", {}))
-    restricted_space = _restrict_to_basic_factors(original_space)
-    if len(restricted_space) != len(original_space):
-        LOGGER.info(
-            "기본 팩터 프로파일: %d→%d개 파라미터로 탐색 공간을 축소합니다.",
-            len(original_space),
-            len(restricted_space),
-        )
-        if not restricted_space:
-            LOGGER.warning(
-                "기본 팩터 집합에 해당하는 항목이 없어 탐색 공간이 비었습니다."
-                " space 설정을 점검하세요."
+
+    basic_profile_flag = _coerce_bool_or_none(search_cfg.get("basic_factor_profile"))
+    if basic_profile_flag is None:
+        basic_profile_flag = _coerce_bool_or_none(search_cfg.get("use_basic_factors"))
+    use_basic_factors = True if basic_profile_flag is None else basic_profile_flag
+
+    space = _restrict_to_basic_factors(original_space, enabled=use_basic_factors)
+    if use_basic_factors:
+        if len(space) != len(original_space):
+            LOGGER.info(
+                "기본 팩터 프로파일: %d→%d개 파라미터로 탐색 공간을 축소합니다.",
+                len(original_space),
+                len(space),
             )
-    space = restricted_space
+            if not space:
+                LOGGER.warning(
+                    "기본 팩터 집합에 해당하는 항목이 없어 탐색 공간이 비었습니다."
+                    " space 설정을 점검하세요."
+                )
+    else:
+        LOGGER.info(
+            "기본 팩터 프로파일 비활성화: 전체 %d개 파라미터 탐색", len(space)
+        )
+
     params_cfg["space"] = space
 
     dataset_groups, timeframe_groups, default_key = _group_datasets(datasets)
@@ -933,13 +1093,17 @@ def optimisation_loop(
         )
         dataset_jobs = 1
     if dataset_jobs <= 1:
-        max_parallel = min(len(datasets) or 1, max(1, available_cpu // max(1, n_jobs)))
+        max_parallel = min(len(datasets) or 1, max(1, available_cpu))
         if max_parallel > 1:
             dataset_jobs = max_parallel
             search_cfg["dataset_jobs"] = dataset_jobs
-            LOGGER.info("기본 팩터 프로파일: dataset_jobs=%d 자동 설정", dataset_jobs)
+            LOGGER.info(
+                "기본 팩터 프로파일: dataset_jobs=%d 자동 설정 (총 CPU=%d)",
+                dataset_jobs,
+                available_cpu,
+            )
 
-    dataset_executor = str(search_cfg.get("dataset_executor", "thread") or "thread").lower()
+    dataset_executor = str(search_cfg.get("dataset_executor", "process") or "process").lower()
     if dataset_executor not in {"thread", "process"}:
         LOGGER.warning(
             "알 수 없는 dataset_executor '%s' 가 지정되어 thread 모드로 대체합니다.",
@@ -953,6 +1117,15 @@ def optimisation_loop(
     )
 
     if dataset_jobs > 1:
+        optuna_budget = max(1, available_cpu // max(1, dataset_jobs))
+        if optuna_budget < n_jobs:
+            LOGGER.info(
+                "데이터셋 병렬화를 위해 Optuna worker 수를 %d→%d 로 조정합니다.",
+                n_jobs,
+                optuna_budget,
+            )
+            n_jobs = optuna_budget
+            search_cfg["n_jobs"] = n_jobs
         LOGGER.info(
             "데이터셋 병렬 백테스트 worker %d개 (%s) 사용", dataset_jobs, dataset_executor
         )
@@ -1163,10 +1336,13 @@ def optimisation_loop(
         snapshot = {
             "best_value": best_value,
             "best_params": best_params_full,
-            "basic_params": {
-                key: value for key, value in best_params_full.items() if key in BASIC_FACTOR_KEYS
-            },
         }
+        if use_basic_factors:
+            snapshot["basic_params"] = {
+                key: value for key, value in best_params_full.items() if key in BASIC_FACTOR_KEYS
+            }
+        else:
+            snapshot["basic_params"] = dict(best_params_full)
         with best_yaml_path.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(snapshot, handle, allow_unicode=True, sort_keys=False)
 
@@ -1208,7 +1384,9 @@ def optimisation_loop(
                 }
             )
 
-            partial_metrics = combine_metrics(numeric_metrics)
+            partial_metrics = combine_metrics(
+                numeric_metrics, simple_override=simple_metrics_enabled
+            )
             partial_score = score_metrics(partial_metrics, objective_specs)
             partial_score = _sanitise(partial_score, f"partial@{idx}")
             partial_objectives: Optional[Tuple[float, ...]] = (
@@ -1300,7 +1478,9 @@ def optimisation_loop(
                     raise
                 _consume_dataset(idx, dataset, metrics)
 
-        aggregated = combine_metrics(numeric_metrics)
+        aggregated = combine_metrics(
+            numeric_metrics, simple_override=simple_metrics_enabled
+        )
         score = score_metrics(aggregated, objective_specs)
         score = _sanitise(score, "final")
         objective_values = (
@@ -1348,7 +1528,9 @@ def optimisation_loop(
             _run_optuna(llm_initial)
             candidates = generate_llm_candidates(space, study.trials, llm_cfg)
             for candidate in candidates[:llm_count]:
-                trial_params = _filter_basic_factor_params(dict(candidate))
+                trial_params = _filter_basic_factor_params(
+                    dict(candidate), enabled=use_basic_factors
+                )
                 if not trial_params:
                     continue
                 trial_params.update(forced_params)
@@ -1397,6 +1579,7 @@ def optimisation_loop(
         "best": best_record,
         "multi_objective": multi_objective,
         "storage": storage_meta,
+        "basic_factor_profile": use_basic_factors,
     }
 
 
@@ -1440,6 +1623,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-simple-metrics",
         action="store_true",
         help="단순 ProfitFactor 경로 강제 설정을 비활성화합니다",
+    )
+    parser.add_argument(
+        "--full-space",
+        action="store_true",
+        help="기본 팩터 필터를 비활성화하고 원본 탐색 공간을 그대로 사용합니다",
+    )
+    parser.add_argument(
+        "--basic-factors-only",
+        action="store_true",
+        help="기본 팩터 필터를 강제로 활성화합니다",
     )
     parser.add_argument("--interactive", action="store_true", help="Prompt for dataset and toggle selections")
     parser.add_argument("--enable", action="append", default=[], help="Force-enable boolean parameters (comma separated)")
@@ -1566,6 +1759,13 @@ def _execute_single(
     if args.dataset_start_method:
         search_cfg = _ensure_dict(params_cfg, "search")
         search_cfg["dataset_start_method"] = args.dataset_start_method
+
+    if getattr(args, "full_space", False):
+        search_cfg = _ensure_dict(params_cfg, "search")
+        search_cfg["basic_factor_profile"] = False
+    elif getattr(args, "basic_factors_only", False):
+        search_cfg = _ensure_dict(params_cfg, "search")
+        search_cfg["basic_factor_profile"] = True
 
     if args.study_name:
         search_cfg = _ensure_dict(params_cfg, "search")
@@ -1719,6 +1919,12 @@ def _execute_single(
         if decision is not None:
             _apply_simple_metrics(decision)
 
+    simple_metrics_enabled = bool(forced_params.get("simpleMetricsOnly", False))
+    if simple_metrics_enabled:
+        LOGGER.info("단순 ProfitFactor 기반 계산 경로를 강제 활성화합니다.")
+    else:
+        LOGGER.info("전체 지표 계산 경로를 사용합니다.")
+
     params_cfg["overrides"] = forced_params
 
     datasets = prepare_datasets(params_cfg, backtest_cfg, args.data)
@@ -1739,11 +1945,8 @@ def _execute_single(
                     available_cpu,
                 )
         dataset_jobs_current = int(search_cfg.get("dataset_jobs", 1) or 1)
-        if len(datasets) > 1 and available_cpu > current_n_jobs and dataset_jobs_current <= 1:
-            max_parallel = max(
-                1,
-                min(len(datasets), max(1, available_cpu // max(1, search_cfg.get("n_jobs", 1)))),
-            )
+        if len(datasets) > 1 and dataset_jobs_current <= 1:
+            max_parallel = min(len(datasets), max(1, available_cpu))
             if max_parallel > 1:
                 search_cfg["dataset_jobs"] = max_parallel
                 LOGGER.info(
@@ -1752,6 +1955,13 @@ def _execute_single(
                     len(datasets),
                     available_cpu,
                 )
+                adjusted_n_jobs = max(1, available_cpu // max_parallel)
+                if adjusted_n_jobs < current_n_jobs:
+                    search_cfg["n_jobs"] = adjusted_n_jobs
+                    LOGGER.info(
+                        "Auto workers: Optuna n_jobs=%d (dataset 병렬 보정)",
+                        adjusted_n_jobs,
+                    )
 
 
     output_dir, tag_info = _resolve_output_directory(args.output, datasets, params_cfg, args.run_tag)
@@ -1780,11 +1990,18 @@ def _execute_single(
     if resume_bank_path is None:
         resume_bank_path = _discover_bank_path(output_dir, tag_info, space_hash)
 
+    search_cfg_effective = params_cfg.get("search", {})
+    basic_flag = _coerce_bool_or_none(search_cfg_effective.get("basic_factor_profile"))
+    if basic_flag is None:
+        basic_flag = _coerce_bool_or_none(search_cfg_effective.get("use_basic_factors"))
+    basic_filter_enabled = True if basic_flag is None else basic_flag
+
     seed_trials = _load_seed_trials(
         resume_bank_path,
         params_cfg.get("space", {}),
         space_hash,
         regime_label=regime_summary.label,
+        basic_filter_enabled=basic_filter_enabled,
     )
 
     study_storage = _resolve_study_storage(params_cfg, datasets)
@@ -1944,7 +2161,9 @@ def _execute_single(
     bank_entries: List[Dict[str, object]] = []
     for item in candidate_summaries:
         trial_record = trial_index.get(item["trial"], {})
-        filtered_params = _filter_basic_factor_params(item.get("params") or {})
+        filtered_params = _filter_basic_factor_params(
+            item.get("params") or {}, enabled=optimisation.get("basic_factor_profile", True)
+        )
         entry = {
             "trial": item["trial"],
             "score": item.get("score"),
@@ -1985,6 +2204,7 @@ def _execute_single(
         "risk": risk,
         "objectives": [spec.__dict__ for spec in objective_specs],
         "search": search_manifest,
+        "basic_factor_profile": optimisation.get("basic_factor_profile", True),
         "resume_bank": str(resume_bank_path) if resume_bank_path else None,
         "study_storage": storage_meta.get("path") if storage_meta.get("backend") == "sqlite" else None,
         "regime": regime_summary.__dict__,
