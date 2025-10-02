@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Sequence
 
 import optuna
 
@@ -138,6 +139,71 @@ def _validate_candidate(candidate: Dict[str, object], space: SpaceSpec) -> Optio
     return validated
 
 
+def _coerce_float(value: object) -> Optional[float]:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
+
+
+def _trial_objective_values(trial: optuna.trial.FrozenTrial) -> Optional[List[object]]:
+    raw_values = getattr(trial, "values", None)
+    if isinstance(raw_values, Sequence) and not isinstance(raw_values, (str, bytes)):
+        return list(raw_values)
+    raw_value = getattr(trial, "value", None)
+    if isinstance(raw_value, Sequence) and not isinstance(raw_value, (str, bytes)):
+        return list(raw_value)
+    return None
+
+
+def _trial_priority(
+    trial: optuna.trial.FrozenTrial, config: Dict[str, object]
+) -> float:
+    direct = _coerce_float(getattr(trial, "value", None))
+    if direct is not None:
+        return direct
+
+    values = _trial_objective_values(trial)
+    if not values:
+        return float("-inf")
+
+    # 멀티 목적 최적화 시 우선순위로 사용할 지표 인덱스를 명시적으로 지정할 수 있습니다.
+    index = config.get("objective_index")
+    if isinstance(index, int) and 0 <= index < len(values):
+        indexed = _coerce_float(values[index])
+        if indexed is not None:
+            return indexed
+
+    for candidate in values:
+        numeric = _coerce_float(candidate)
+        if numeric is not None:
+            return numeric
+    return float("-inf")
+
+
+def _serialise_objective_values(values: Optional[List[object]]) -> Optional[List[object]]:
+    if not values:
+        return None
+    serialised: List[object] = []
+    for value in values:
+        numeric = _coerce_float(value)
+        serialised.append(numeric if numeric is not None else value)
+    return serialised
+
+
+def _has_objective_values(trial: optuna.trial.FrozenTrial) -> bool:
+    value = getattr(trial, "value", None)
+    if value is not None:
+        return True
+    values = _trial_objective_values(trial)
+    if not values:
+        return False
+    return any(item is not None for item in values)
+
+
 def generate_llm_candidates(
     space: SpaceSpec,
     trials: Iterable[optuna.trial.FrozenTrial],
@@ -157,7 +223,7 @@ def generate_llm_candidates(
     finished_trials: List[optuna.trial.FrozenTrial] = [
         trial
         for trial in trials
-        if trial.value is not None and trial.state.is_finished()
+        if trial.state.is_finished() and _has_objective_values(trial)
     ]
     if not finished_trials:
         LOGGER.info("아직 완료된 트라이얼이 없어 LLM 제안을 생략합니다.")
@@ -167,17 +233,21 @@ def generate_llm_candidates(
     count = max(int(config.get("count", 8)), 1)
     sorted_trials = sorted(
         finished_trials,
-        key=lambda trial: float(trial.value) if trial.value is not None else float("-inf"),
+        key=lambda trial: _trial_priority(trial, config),
         reverse=True,
     )
-    top_trials = [
-        {
+    top_trials: List[Dict[str, object]] = []
+    for trial in sorted_trials[:top_n]:
+        priority = _trial_priority(trial, config)
+        entry: Dict[str, object] = {
             "number": trial.number,
-            "value": float(trial.value) if trial.value is not None else None,
+            "value": priority if math.isfinite(priority) else None,
             "params": trial.params,
         }
-        for trial in sorted_trials[:top_n]
-    ]
+        values = _serialise_objective_values(_trial_objective_values(trial))
+        if values is not None:
+            entry["values"] = values
+        top_trials.append(entry)
 
     client = genai.Client(api_key=api_key)
     model = str(config.get("model", "gemini-2.0-flash-exp"))
