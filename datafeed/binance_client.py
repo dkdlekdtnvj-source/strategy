@@ -16,6 +16,76 @@ except ImportError as exc:  # pragma: no cover - dependency handled via requirem
 
 LOGGER = logging.getLogger(__name__)
 
+_BINANCE_ALLOWED_TIMEFRAMES = (
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "8h",
+    "12h",
+    "1d",
+    "3d",
+    "1w",
+    "1M",
+)
+
+_BINANCE_ALLOWED_TIMEFRAMES_LOWER = {
+    value.lower(): value for value in _BINANCE_ALLOWED_TIMEFRAMES
+}
+
+_MINUTE_TO_BINANCE_TIMEFRAME = {
+    1: "1m",
+    3: "3m",
+    5: "5m",
+    15: "15m",
+    30: "30m",
+    60: "1h",
+    120: "2h",
+    240: "4h",
+    360: "6h",
+    480: "8h",
+    720: "12h",
+    1440: "1d",
+    4320: "3d",
+    10080: "1w",
+    43200: "1M",
+}
+
+
+def normalize_timeframe(timeframe: str) -> str:
+    """Normalize timeframe strings to Binance-compatible values."""
+
+    tf = str(timeframe).strip()
+    if not tf:
+        raise ValueError("Timeframe must be a non-empty string")
+
+    if tf in _BINANCE_ALLOWED_TIMEFRAMES:
+        return tf
+
+    tf_lower = tf.lower()
+    if tf_lower in _BINANCE_ALLOWED_TIMEFRAMES_LOWER:
+        return _BINANCE_ALLOWED_TIMEFRAMES_LOWER[tf_lower]
+
+    if tf_lower.endswith("m"):
+        digits = tf_lower[:-1]
+    else:
+        digits = tf_lower
+
+    if digits.isdigit():
+        minutes = int(digits)
+        if minutes in _MINUTE_TO_BINANCE_TIMEFRAME:
+            return _MINUTE_TO_BINANCE_TIMEFRAME[minutes]
+
+    raise ValueError(
+        "Unsupported timeframe for Binance USDM: "
+        f"{timeframe}. Allowed values: {sorted(_BINANCE_ALLOWED_TIMEFRAMES)}"
+    )
+
 
 def _to_milliseconds(dt: datetime | str | pd.Timestamp) -> int:
     ts = pd.Timestamp(dt, tz="UTC")
@@ -49,6 +119,7 @@ class BinanceClient:
         end: datetime | str,
         limit: int = 1000,
     ) -> pd.DataFrame:
+        normalized_timeframe = normalize_timeframe(timeframe)
         market_symbol = _parse_symbol(symbol)
         since = _to_milliseconds(start)
         end_ms = _to_milliseconds(end)
@@ -59,7 +130,7 @@ class BinanceClient:
                 try:
                     batch = self._client.fetch_ohlcv(
                         market_symbol,
-                        timeframe=timeframe,
+                        timeframe=normalized_timeframe,
                         since=since,
                         limit=limit,
                     )
@@ -77,7 +148,7 @@ class BinanceClient:
                 break
 
             all_rows.extend(batch)
-            since = batch[-1][0] + self._client.parse_timeframe(timeframe) * 1000
+            since = batch[-1][0] + self._client.parse_timeframe(normalized_timeframe) * 1000
             time.sleep(self.rate_limit)
 
         if not all_rows:
