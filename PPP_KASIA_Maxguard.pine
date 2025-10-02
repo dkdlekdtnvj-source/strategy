@@ -64,6 +64,8 @@ useDrawdownScaling  = input.bool(true, "드로우다운 리스크 축소", group
 drawdownTriggerPct  = input.float(7.0, "드로우다운 트리거 %", minval=1, maxval=50, group=GRP_RISK)
 drawdownRiskScale   = input.float(0.5, "드로우다운 리스크 배율", minval=0.1, maxval=1.0, step=0.05, group=GRP_RISK)
 
+useVolatilitySizing = input.bool(false, "변동성 연동 노션널 사이징", group=GRP_RISK,
+     tooltip="체크 시 드로우다운/성과 기반 리스크 배율을 노션널 수량에도 반영합니다.")
 usePerfAdaptiveRisk = input.bool(false, "성과 적응 리스크 (PAR)", group=GRP_RISK)
 parLookback         = input.int(6, "PAR 거래 수 집계", minval=2, maxval=20, group=GRP_RISK)
 parMinTrades        = input.int(3, "PAR 최소 거래 수", minval=1, maxval=20, group=GRP_RISK)
@@ -562,13 +564,22 @@ if usePivotSL
     if not na(lastPivotHigh)
         pivHighCache := lastPivotHigh + atrBufferMult * atrStop
 
-calcNotionalQty() =>
-    baseEquity = tradableCapital
-    sizeUsd = notionalSizingType == "Fixed USD" ? notionalSizingValue : baseEquity * (notionalSizingValue / 100.0)
-    riskScale = baseRiskPct > 0 ? finalRiskPct / baseRiskPct : 1.0
-    adjSizeUsd = math.max(sizeUsd * riskScale, 0.0)
+calcNotionalQty(direction) =>
     px = math.max(close, syminfo.mintick)
-    (adjSizeUsd * leverage) / px
+    if px <= 0
+        0.0
+    else
+        baseEquity = tradableCapital
+        sizeUsd = notionalSizingType == "Fixed USD" ? notionalSizingValue : baseEquity * (notionalSizingValue / 100.0)
+        dynScale = useVolatilitySizing and baseRiskPct > 0 ? finalRiskPct / baseRiskPct : 1.0
+        adjSizeUsd = math.max(sizeUsd * dynScale, 0.0)
+        desiredNotional = adjSizeUsd * leverage
+        sameDirection = (direction == 1 and strategy.position_size > 0) or (direction == -1 and strategy.position_size < 0)
+        avgPx = math.max(strategy.position_avg_price, syminfo.mintick)
+        currentNotional = sameDirection ? math.abs(strategy.position_size) * avgPx : 0.0
+        maxNotional = math.max(baseEquity * leverage - currentNotional, 0.0)
+        cappedNotional = math.min(desiredNotional, maxNotional)
+        cappedNotional > 0 ? cappedNotional / px : 0.0
 
 calcRiskQty(stopDistance) =>
     if na(stopDistance) or stopDistance <= 0
@@ -576,9 +587,9 @@ calcRiskQty(stopDistance) =>
     else
         riskSizingType == "Fixed Fractional" ? (tradableCapital * finalRiskPct / 100.0) / stopDistance : fixedContractSize
 
-calcPositionQty(stopDistance) =>
+calcPositionQty(stopDistance, direction) =>
     qtyRisk = calcRiskQty(stopDistance)
-    qtyNotional = calcNotionalQty()
+    qtyNotional = calcNotionalQty(direction)
     qtySelected = positionSizingMode == "Risk-Based" ? qtyRisk : qtyNotional
     na(qtySelected) ? 0.0 : math.max(qtySelected, 0.0)
 
@@ -718,13 +729,13 @@ calcInitialShortStop(entryPrice)=>
 requestLongQty(entryPrice)=>
     stopLevel = calcInitialLongStop(entryPrice)
     stopDist  = entryPrice - stopLevel
-    qty = stopDist > 0 ? calcPositionQty(stopDist + slipBuffer) : 0.0
+    qty = stopDist > 0 ? calcPositionQty(stopDist + slipBuffer, 1) : 0.0
     qty >= minQty ? qty : 0.0
 
 requestShortQty(entryPrice)=>
     stopLevel = calcInitialShortStop(entryPrice)
     stopDist  = stopLevel - entryPrice
-    qty = stopDist > 0 ? calcPositionQty(stopDist + slipBuffer) : 0.0
+    qty = stopDist > 0 ? calcPositionQty(stopDist + slipBuffer, -1) : 0.0
     qty >= minQty ? qty : 0.0
 
 if canLong
