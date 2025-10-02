@@ -271,6 +271,8 @@ def _resolve_output_directory(
     run_tag: Optional[str],
 ) -> Tuple[Path, Dict[str, str]]:
     ts, symbol_slug, timeframe_slug, tag = _build_run_tag(datasets, params_cfg, run_tag)
+    htf_value = _extract_primary_htf(params_cfg, datasets)
+    htf_slug = _slugify_timeframe(htf_value)
     if base is None:
         root = DEFAULT_REPORT_ROOT
         output = root / tag
@@ -282,6 +284,7 @@ def _resolve_output_directory(
         "timestamp": ts,
         "symbol": symbol_slug,
         "timeframe": timeframe_slug,
+        "htf_timeframe": htf_slug,
         "tag": tag,
     }
 
@@ -408,6 +411,10 @@ def _discover_bank_path(
             continue
         if metadata.get("timeframe") != tag_info.get("timeframe"):
             continue
+        metadata_htf = metadata.get("htf_timeframe") or "nohtf"
+        target_htf = tag_info.get("htf_timeframe") or "nohtf"
+        if metadata_htf != target_htf:
+            continue
         return bank_path
     return None
 
@@ -477,6 +484,7 @@ def _build_bank_payload(
         "metadata": {
             "symbol": tag_info.get("symbol"),
             "timeframe": tag_info.get("timeframe"),
+            "htf_timeframe": tag_info.get("htf_timeframe"),
             "tag": tag_info.get("tag"),
         },
         "space_hash": space_hash,
