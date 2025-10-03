@@ -264,6 +264,9 @@ minQty       = input.float(0.001, "최소 주문 수량", 0.0, 10, 0.001, group=
 profitLockPct= input.float(1.5, "일일 이익 잠금 % (기존)", 0.0, 20, 0.1, group=GRP_PPP_RISK)
 maxTradesPerDay = input.int(0, "일일 최대 신규 진입 (0=무제한)", 0, 50, group=GRP_PPP_RISK)
 lossCooldownBars = input.int(10, "손실 후 쿨다운 봉", 0, 500, group=GRP_PPP_RISK)
+// 3Commas 연동용 입력 변수 추가
+alert_qty_value = input.float(100.0, "3Commas 알림 수량 (%)", group=GRP_PPP_RISK, tooltip="3Commas 연동 시 사용할 자본 비율(%)입니다.")
+
 
 presetSelect(userValue, scalperValue, baseValue, swingValue)=>
      presetMode == "사용자" ? userValue :
@@ -307,8 +310,9 @@ calcChop(len)=>
     100 * math.log10(trSum / denom) / math.log10(len)
 calcAtrPerc(len)=> ta.atr(len) / close * 100
 
+// [수정됨] ta.dmi 함수 인자 수정
 f_adx(len) =>
-    [_, _, adx] = ta.dmi(high, low, len)
+    [_, _, adx] = ta.dmi(len, len)
     adx
 
 var haTicker = ticker.heikinashi(syminfo.tickerid)
@@ -588,8 +592,8 @@ dirLong  = not useMA100 or close > ma100
 dirShort = not useMA100 or close < ma100
 
 ut_src = utHA
-    ? request.security(haTicker, timeframe.period, close, lookahead=barmerge.lookahead_off)
-    : close
+     ? request.security(haTicker, timeframe.period, close, lookahead=barmerge.lookahead_off)
+     : close
 xATR  = ta.atr(int(utAtrEff))
 nLoss = utKeyEff * xATR
 var float trail = na
@@ -953,19 +957,16 @@ if showDebugger and barstate.islast
 // Alerts (3Commas 연동용)
 // =====================================================================
 
+// [수정됨] 'default_qty_value'를 새로 만든 'alert_qty_value' 변수로 교체
 makeJSON(_action, _side)=>
     str.format('{{"action":"{0}","side":"{1}","symbol":"{2}","leverage":{3},"cap_pct":{4}}}',
-      _action, _side, syminfo.ticker, leverage, default_qty_value)
+      _action, _side, syminfo.ticker, leverage, alert_qty_value)
 
 longOpen   = canLong
 shortOpen  = canShort
 longClose  = strategy.position_size > 0 and (shortSig or (not na(longStop)  and low  <= longStop))
 shortClose = strategy.position_size < 0 and (longSig  or (not na(shortStop) and high >= shortStop))
 
-alertcondition(longOpen,  title="LONG_ENTRY",  message=makeJSON("open","long"))
-alertcondition(shortOpen, title="SHORT_ENTRY", message=makeJSON("open","short"))
-alertcondition(longClose, title="LONG_EXIT",   message=makeJSON("close","long"))
-alertcondition(shortClose,title="SHORT_EXIT",  message=makeJSON("close","short"))
 
 if longOpen
     alert(makeJSON("open","long"), alert.freq_once_per_bar)
