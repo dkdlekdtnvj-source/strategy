@@ -307,8 +307,20 @@ calcChop(len)=>
     100 * math.log10(trSum / denom) / math.log10(len)
 calcAtrPerc(len)=> ta.atr(len) / close * 100
 
-haClose(tf)=> request.security(heikinashi, tf, close, lookahead=barmerge.lookahead_off)
+f_adx(len) =>
+    [_, _, adx] = ta.dmi(high, low, len)
+    adx
+
+var haTicker = ticker.heikinashi(syminfo.tickerid)
+
+haClose(tf)=> request.security(haTicker, tf, close, lookahead=barmerge.lookahead_off)
 ema20(tf)  => request.security(syminfo.tickerid, tf, ta.ema(close,20), lookahead=barmerge.lookahead_off)
+
+f_str(val) => str.tostring(val, format.mintick)
+
+f_cell(tbl, c, r, ok) =>
+    bg = ok ? color.new(color.green, 80) : color.new(color.red, 80)
+    table.cell(tbl, c, r, ok ? "OK" : "X", bgcolor=bg, text_color=color.white)
 
 // =====================================================================
 // KASIA Base Module 계산 로직
@@ -477,10 +489,6 @@ rangeAtr  = ta.atr(rangeLen)
 isRanging = (rangeHigh - rangeLow) < rangeAtr * rangeAtrMult
 rangeOK   = not useRangeFilter or not isRanging
 
-f_adx(len) =>
-    [_, _, adx] = ta.dmi(high, low, len)
-    adx
-
 htfEmaSeries = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen))
 htfEma       = htfEmaSeries[1]
 htfAdxSeries = request.security(syminfo.tickerid, htfTf, f_adx(htfAdxLen))
@@ -579,7 +587,9 @@ ma100 = ma(close, maType, 100)
 dirLong  = not useMA100 or close > ma100
 dirShort = not useMA100 or close < ma100
 
-ut_src = utHA ? request.security(heikinashi, timeframe.period, close, lookahead=barmerge.lookahead_off) : close
+ut_src = utHA
+    ? request.security(haTicker, timeframe.period, close, lookahead=barmerge.lookahead_off)
+    : close
 xATR  = ta.atr(int(utAtrEff))
 nLoss = utKeyEff * xATR
 var float trail = na
@@ -842,7 +852,6 @@ if showHUD and barstate.islast
         "Bottom Left" => position.bottom_left
         => position.bottom_right
     var table hud = table.new(posMap, 2, 14, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
-    f_str(val) => str.tostring(val, format.mintick)
     table.cell(hud, 0, 0, "KCAS HUD", text_color=color.white, bgcolor=color.new(color.purple, 20))
     table.cell(hud, 1, 0, "", bgcolor=color.new(color.purple, 20))
     table.merge_cells(hud, 0, 0, 1, 0)
@@ -892,9 +901,6 @@ if showDebugger and barstate.islast
     table.cell(dbg, 1, 0, "", bgcolor=headerDbgBg)
     table.cell(dbg, 2, 0, "", bgcolor=headerDbgBg)
     table.merge_cells(dbg, 0, 0, 2, 0)
-    f_cell(tbl, c, r, ok) =>
-        bg = ok ? color.new(color.green, 80) : color.new(color.red, 80)
-        table.cell(tbl, c, r, ok ? "OK" : "X", bgcolor=bg, text_color=color.white)
     table.cell(dbg, 0, 1, "시간 필터", text_color=color.white)
     f_cell(dbg, 1, 1, isTimeAllowed)
     table.cell(dbg, 0, 2, "레짐 L/S", text_color=color.white)
