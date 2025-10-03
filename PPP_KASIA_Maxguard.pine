@@ -26,13 +26,13 @@ startMonth  = input.int(1,   "백테스트 시작 월",   minval=1, maxval=12, g
 startDay    = input.int(1,   "백테스트 시작 일",   minval=1, maxval=31, group=GRP_TIME)
 startTs     = timestamp(syminfo.timezone, startYear, startMonth, startDay, 0, 0)
 
-useSessionFilter = input.bool(true, "기본 세션 필터 사용", group=GRP_TIME)
+useSessionFilter = input.bool(false, "기본 세션 필터 사용", group=GRP_TIME)
 primarySession   = input.session("0830-0200", "기본 세션 (거래소 로컬)", group=GRP_TIME)
 
-useKstSession = input.bool(true, "한국시간 세션 필터", group=GRP_TIME)
+useKstSession = input.bool(false, "한국시간 세션 필터", group=GRP_TIME)
 kstSession   = input.session("0930-0200", "한국시간 세션", group=GRP_TIME)
 
-useDayFilter = input.bool(true, "요일 필터 사용", group=GRP_TIME)
+useDayFilter = input.bool(false, "요일 필터 사용", group=GRP_TIME)
 monOk = input.bool(true,  "월", inline="dow1", group=GRP_TIME)
 tueOk = input.bool(true,  "화", inline="dow1", group=GRP_TIME)
 wedOk = input.bool(true,  "수", inline="dow1", group=GRP_TIME)
@@ -95,63 +95,63 @@ maxDailyLosses      = input.int(3, "일일 최대 손실 거래 수", minval=0, 
 maxWeeklyDD         = input.float(9.0, "주간 최대 드로우다운 %", minval=0, group=GRP_GUARD)
 maxGuardFires       = input.int(4, "청산 가드 최대 발동", minval=0, group=GRP_GUARD)
 
-useVolatilityGuard  = input.bool(true, "ATR 변동성 가드", group=GRP_GUARD)
+useVolatilityGuard  = input.bool(false, "ATR 변동성 가드", group=GRP_GUARD)
 volatilityLookback  = input.int(50, "ATR %% 기간", minval=10, maxval=200, group=GRP_GUARD)
 volatilityLowerPct  = input.float(0.15, "ATR %% 하한", minval=0.05, step=0.05, group=GRP_GUARD)
 volatilityUpperPct  = input.float(2.5, "ATR %% 상한", minval=0.2, step=0.05, group=GRP_GUARD)
 
 // ---- 시장 컨텍스트 필터 ----
-useRegimeFilter = input.bool(true, "상위봉 레짐 필터", group=GRP_CTX)
+useRegimeFilter = input.bool(false, "상위봉 레짐 필터", group=GRP_CTX)
 htfTf           = input.timeframe("240", "상위봉 타임프레임", group=GRP_CTX)
 htfEmaLen       = input.int(120, "상위봉 EMA 길이", minval=20, maxval=400, group=GRP_CTX)
 htfAdxLen       = input.int(14, "상위봉 ADX 길이", minval=5, maxval=50, group=GRP_CTX)
 htfAdxTh        = input.float(22, "상위봉 ADX 임계값", minval=5, maxval=50, step=0.5, group=GRP_CTX)
 htfRsiLen       = input.int(21, "상위봉 RSI 길이", minval=5, maxval=50, group=GRP_CTX)
 
-useVWAPFilter   = input.bool(true, "VWAP 필터", group=GRP_CTX)
-useMicroTrend   = input.bool(true, "EMA 클라우드 (Micro Trend)", group=GRP_CTX)
+useVWAPFilter   = input.bool(false, "VWAP 필터", group=GRP_CTX)
+useMicroTrend   = input.bool(false, "EMA 클라우드 (Micro Trend)", group=GRP_CTX)
 emaFastLenBase  = input.int(21, "EMA 빠른선 기본", minval=5, maxval=100, group=GRP_CTX)
 emaSlowLenBase  = input.int(55, "EMA 느린선 기본", minval=10, maxval=200, group=GRP_CTX)
 
-useRangeFilter  = input.bool(true, "레인지 차단", group=GRP_CTX)
+useRangeFilter  = input.bool(false, "레인지 차단", group=GRP_CTX)
 rangeLen        = input.int(36, "레인지 기준 봉수", minval=5, maxval=200, group=GRP_CTX)
 rangeAtrMult    = input.float(1.4, "레인지 ATR 배수", minval=0.5, maxval=5, step=0.1, group=GRP_CTX)
 
-useDistanceGuard = input.bool(true, "가격 이격 가드", group=GRP_CTX)
+useDistanceGuard = input.bool(false, "가격 이격 가드", group=GRP_CTX)
 distanceAtrLen   = input.int(21, "이격 ATR 길이", minval=5, maxval=200, group=GRP_CTX)
 distanceMaxAtr   = input.float(2.4, "최대 이격 (ATR)", minval=0.5, maxval=5, step=0.1, group=GRP_CTX)
 
-useSlopeFilter   = input.bool(true, "EMA 기울기 필터", group=GRP_CTX)
+useSlopeFilter   = input.bool(false, "EMA 기울기 필터", group=GRP_CTX)
 slopeLookback    = input.int(8, "기울기 룩백", minval=1, maxval=50, group=GRP_CTX)
 slopeMinPct      = input.float(0.06, "최소 기울기 (%)", minval=0.0, maxval=1.0, step=0.01, group=GRP_CTX)
 
-useTrendBias     = input.bool(true, "추세 EMA 필터", group=GRP_CTX)
+useTrendBias     = input.bool(false, "추세 EMA 필터", group=GRP_CTX)
 trendLenBase     = input.int(200, "추세 EMA 기본", minval=20, maxval=400, group=GRP_CTX)
-useConfBias      = input.bool(true, "확인 EMA 필터", group=GRP_CTX)
+useConfBias      = input.bool(false, "확인 EMA 필터", group=GRP_CTX)
 confLenBase      = input.int(55, "확인 EMA 기본", minval=10, maxval=300, group=GRP_CTX)
 
 // ---- 모멘텀/구조 필터 ----
-useMomConfirm   = input.bool(true, "모멘텀 확증 사용", group=GRP_FILTER)
+useMomConfirm   = input.bool(false, "모멘텀 확증 사용", group=GRP_FILTER)
 bbLen           = input.int(18, "볼린저 길이", minval=10, maxval=100, group=GRP_FILTER)
 bbMult          = input.float(1.2, "볼린저 배수", minval=0.5, maxval=5, step=0.1, group=GRP_FILTER)
 kcLen           = input.int(21, "켈트너 길이", minval=10, maxval=100, group=GRP_FILTER)
 
-useCHoCH        = input.bool(true, "CHoCH 확인 사용", group=GRP_FILTER)
+useCHoCH        = input.bool(false, "CHoCH 확인 사용", group=GRP_FILTER)
 pL              = input.int(2, "피벗 좌", minval=1, maxval=20, group=GRP_FILTER)
 pR              = input.int(3, "피벗 우", minval=1, maxval=20, group=GRP_FILTER)
 
-useVolumeFilter = input.bool(true, "거래량 스파이크 필터", group=GRP_FILTER)
+useVolumeFilter = input.bool(false, "거래량 스파이크 필터", group=GRP_FILTER)
 volumeLookback  = input.int(34, "거래량 평균 기간", minval=5, maxval=200, group=GRP_FILTER)
 volumeMultiplier = input.float(1.3, "거래량 배수", minval=1.0, maxval=5.0, step=0.1, group=GRP_FILTER)
 
-useCandleFilter = input.bool(true, "캔들 모멘텀 필터", group=GRP_FILTER)
+useCandleFilter = input.bool(false, "캔들 모멘텀 필터", group=GRP_FILTER)
 candleBodyRatio = input.float(55, "몸통 비율 %", minval=10, maxval=99, step=1, group=GRP_FILTER)
 
-useRSIShift     = input.bool(true, "상위봉 RSI 바이어스", group=GRP_FILTER)
+useRSIShift     = input.bool(false, "상위봉 RSI 바이어스", group=GRP_FILTER)
 rsiBullBand     = input.float(52, "RSI 강세 기준", minval=40, maxval=70, step=0.5, group=GRP_FILTER)
 rsiBearBand     = input.float(48, "RSI 약세 기준", minval=30, maxval=60, step=0.5, group=GRP_FILTER)
 
-useEquitySlopeFilter = input.bool(true, "순자산 기울기 필터", group=GRP_FILTER)
+useEquitySlopeFilter = input.bool(false, "순자산 기울기 필터", group=GRP_FILTER)
 eqSlopeLen      = input.int(120, "순자산 기울기 길이", minval=20, maxval=500, group=GRP_FILTER)
 
 // ---- 손절 & 유틸 ----
@@ -193,7 +193,7 @@ presetMode = input.string("사용자", "프리셋 모드", options=["사용자",
 tf_stoch= input.timeframe("15", "StochRSI TF", group=GRP_PPP_TIME)
 tf_htf1 = input.timeframe("60", "HTF-1 (Trend/EMA20+HA)", group=GRP_PPP_TIME)
 tf_htf2 = input.timeframe("D",  "HTF-2 (Trend/EMA20+HA)", group=GRP_PPP_TIME)
-useReg  = input.bool(true, "BTC 레짐 필터 사용", group=GRP_PPP_TIME)
+useReg  = input.bool(false, "BTC 레짐 필터 사용", group=GRP_PPP_TIME)
 regSym  = input.symbol("BINANCE:BTCUSDT", "레짐 심볼", group=GRP_PPP_TIME)
 regTF   = input.timeframe("D", "레짐 TF (EMA200+ADX)", group=GRP_PPP_TIME)
 regADX  = input.int(20, "레짐 ADX ≥", 5, 50, group=GRP_PPP_TIME)
@@ -215,7 +215,7 @@ os    = input.float(20, "과매도", 0, 50, group=GRP_PPP_STO)
 stMode= input.string("Bounce", "시그널 모드", options=["Bounce","Cross"], group=GRP_PPP_STO)
 
 // --- PPP 추세 필터 ---
-useMA100 = input.bool(true, "현재 TF MA100 필터", group=GRP_PPP_TREND)
+useMA100 = input.bool(false, "현재 TF MA100 필터", group=GRP_PPP_TREND)
 maType    = input.string("EMA", "MA100 유형", options=["EMA","SMA","WMA"], group=GRP_PPP_TREND)
 
 // --- PPP 청산 ---
@@ -244,19 +244,19 @@ roi3Min = input.int(150, "ROI3 경과 분", 0, 1000, group=GRP_PPP_EXIT)
 roi3Pct = input.float(1.6, "ROI3 목표 %", 0.0, 50, 0.1, group=GRP_PPP_EXIT)
 
 // --- PPP 고급 필터 ---
-useEWO     = input.bool(true, "EWO 컨펌", group=GRP_PPP_ADV)
+useEWO     = input.bool(false, "EWO 컨펌", group=GRP_PPP_ADV)
 ewoFast    = input.int(16, "EWO 빠른 EMA", 1, 200, group=GRP_PPP_ADV)
 ewoSlow    = input.int(26, "EWO 느린 EMA", 2, 400, group=GRP_PPP_ADV)
 ewoSignal  = input.int(9, "EWO 시그널", 1, 100, group=GRP_PPP_ADV)
-useChop    = input.bool(true, "Choppiness 필터", group=GRP_PPP_ADV)
+useChop    = input.bool(false, "Choppiness 필터", group=GRP_PPP_ADV)
 chopLen    = input.int(14, "Chop 길이", 5, 100, group=GRP_PPP_ADV)
 chopMax    = input.float(61.8, "허용 Chop 최대", 30, 70, group=GRP_PPP_ADV)
-useVolatility = input.bool(true, "추가 ATR% 필터", group=GRP_PPP_ADV)
+useVolatility = input.bool(false, "추가 ATR% 필터", group=GRP_PPP_ADV)
 minAtrPerc    = input.float(0.8, "최소 ATR%", 0.1, 20, 0.1, group=GRP_PPP_ADV)
 maxAtrPerc    = input.float(8.0, "최대 ATR%", 0.2, 50, 0.1, group=GRP_PPP_ADV)
-useVolumeBoost = input.bool(true, "거래량 필터", group=GRP_PPP_ADV)
+useVolumeBoost = input.bool(false, "거래량 필터", group=GRP_PPP_ADV)
 volLen          = input.int(20, "거래량 SMA", 1, 200, group=GRP_PPP_ADV)
-useStructure    = input.bool(true, "최근 고/저 돌파 요구", group=GRP_PPP_ADV)
+useStructure    = input.bool(false, "최근 고/저 돌파 요구", group=GRP_PPP_ADV)
 structureLen    = input.int(20, "구조 룩백", 5, 200, group=GRP_PPP_ADV)
 
 // --- PPP 리스크 ---
@@ -467,7 +467,7 @@ stop_by_profit  = dailyProfitReached or weeklyProfitReached
 
 isCapitalBreached = useCapitalGuard and strategy.equity < strategy.initial_capital * (1 - capitalGuardPct / 100.0)
 
-htfRsiSeries = request.security(syminfo.tickerid, htfTf, ta.rsi(close, htfRsiLen))
+htfRsiSeries = request.security(syminfo.tickerid, htfTf, ta.rsi(close, htfRsiLen), lookahead=barmerge.lookahead_off)
 htfRsi       = htfRsiSeries[1]
 
 emaFast = ta.ema(close, emaFastLenBase)
@@ -493,9 +493,9 @@ rangeAtr  = ta.atr(rangeLen)
 isRanging = (rangeHigh - rangeLow) < rangeAtr * rangeAtrMult
 rangeOK   = not useRangeFilter or not isRanging
 
-htfEmaSeries = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen))
+htfEmaSeries = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
 htfEma       = htfEmaSeries[1]
-htfAdxSeries = request.security(syminfo.tickerid, htfTf, f_adx(htfAdxLen))
+htfAdxSeries = request.security(syminfo.tickerid, htfTf, f_adx(htfAdxLen), lookahead=barmerge.lookahead_off)
 htfAdx       = htfAdxSeries[1]
 
 htfLong = not useRegimeFilter or (close > htfEma and htfAdx > htfAdxTh)
@@ -524,10 +524,14 @@ momOK_S = not useMomConfirm or (mom < 0 and (not squeezeOn or ta.crossunder(mom,
 
 ph = ta.pivothigh(high, pL, pR)
 pl = ta.pivotlow(low, pL, pR)
-lastHigh = ta.valuewhen(not na(ph), ph, 0)
-lastLow  = ta.valuewhen(not na(pl), pl, 0)
-bullCHoCH = not na(lastHigh) and not na(lastLow) and close > lastHigh and low > lastLow
-bearCHoCH = not na(lastHigh) and not na(lastLow) and close < lastLow and high < lastHigh
+var float chochHigh = na
+var float chochLow  = na
+if not na(ph)
+    chochHigh := ph
+if not na(pl)
+    chochLow := pl
+bullCHoCH = not na(chochHigh) and not na(chochLow) and close > chochHigh and low > chochLow
+bearCHoCH = not na(chochHigh) and not na(chochLow) and close < chochLow and high < chochHigh
 chochOK_L = not useCHoCH or bullCHoCH
 chochOK_S = not useCHoCH or bearCHoCH
 
@@ -552,13 +556,19 @@ contextShortOK = microTrendShort and trendBiasShortOK and confBiasShortOK and sl
 
 var float pivLowCache  = na
 var float pivHighCache = na
+var float pivotLowRaw  = na
+var float pivotHighRaw = na
 if usePivotSL
-    lastPivotLow  = ta.valuewhen(not na(ta.pivotlow(low, pivLeft, pivRight)), ta.pivotlow(low, pivLeft, pivRight), 0)
-    lastPivotHigh = ta.valuewhen(not na(ta.pivothigh(high, pivLeft, pivRight)), ta.pivothigh(high, pivLeft, pivRight), 0)
-    if not na(lastPivotLow)
-        pivLowCache := lastPivotLow - atrBufferMult * atrStop
-    if not na(lastPivotHigh)
-        pivHighCache := lastPivotHigh + atrBufferMult * atrStop
+    newPivotLow  = ta.pivotlow(low, pivLeft, pivRight)
+    newPivotHigh = ta.pivothigh(high, pivLeft, pivRight)
+    if not na(newPivotLow)
+        pivotLowRaw := newPivotLow
+    if not na(newPivotHigh)
+        pivotHighRaw := newPivotHigh
+    if not na(pivotLowRaw)
+        pivLowCache := pivotLowRaw - atrBufferMult * atrStop
+    if not na(pivotHighRaw)
+        pivHighCache := pivotHighRaw + atrBufferMult * atrStop
 
 calcNotionalQty() =>
     baseEquity = tradableCapital
