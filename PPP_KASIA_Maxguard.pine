@@ -779,7 +779,7 @@ trailStopPctLong  = trailTriggerLong ? close * (1 - trailPct) : na
 trailStopPctShort = trailTriggerShort ? close * (1 + trailPct) : na
 
 barsInTrade = strategy.opentrades > 0 ? bar_index - strategy.opentrades.entry_bar_index(0) : na
-tradeMinutes = strategy.opentrades > 0 ? (timenow - strategy.opentrades.entry_time(0)) / 60000 : na
+tradeMinutes = strategy.opentrades > 0 ? math.max(0, (nz(timenow, time) - strategy.opentrades.entry_time(0)) / 60000) : na
 roiHitLong = strategy.position_size > 0 and not na(tradeMinutes) and (
      (roi1MinEff > 0 and tradeMinutes >= roi1MinEff and close >= strategy.position_avg_price * (1 + roi1PctEff / 100.0)) or
      (roi2MinEff > 0 and tradeMinutes >= roi2MinEff and close >= strategy.position_avg_price * (1 + roi2PctEff / 100.0)) or
