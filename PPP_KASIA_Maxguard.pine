@@ -775,8 +775,24 @@ percentTakeShort = strategy.position_size < 0 ? strategy.position_avg_price * (1
 trailTriggerLong = strategy.position_size > 0 and close >= strategy.position_avg_price * (1 + trailStartEff / 100.0)
 trailTriggerShort= strategy.position_size < 0 and close <= strategy.position_avg_price * (1 - trailStartEff / 100.0)
 trailPct = trailGapEff / 100.0
-trailStopPctLong  = trailTriggerLong ? close * (1 - trailPct) : na
-trailStopPctShort = trailTriggerShort ? close * (1 + trailPct) : na
+var float trailStopPctLongCache = na
+var float trailStopPctShortCache = na
+
+trailStopPctLongCurrent  = close * (1 - trailPct)
+trailStopPctShortCurrent = close * (1 + trailPct)
+
+if not trailTriggerLong
+    trailStopPctLongCache := na
+else
+    trailStopPctLongCache := na(trailStopPctLongCache) ? trailStopPctLongCurrent : math.max(trailStopPctLongCache, trailStopPctLongCurrent)
+
+if not trailTriggerShort
+    trailStopPctShortCache := na
+else
+    trailStopPctShortCache := na(trailStopPctShortCache) ? trailStopPctShortCurrent : math.min(trailStopPctShortCache, trailStopPctShortCurrent)
+
+trailStopPctLong  = trailStopPctLongCache
+trailStopPctShort = trailStopPctShortCache
 
 barsInTrade = strategy.opentrades > 0 ? bar_index - strategy.opentrades.entry_bar_index(0) : na
 tradeMinutes = strategy.opentrades > 0 ? math.max(0, (nz(timenow, time) - strategy.opentrades.entry_time(0)) / 60000) : na
