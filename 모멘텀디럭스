@@ -590,21 +590,27 @@ calc_stdev(series float src, simple int len) =>
             sum += (val - sq) * (val - psq)
         math.sqrt(sum / (len - 1))
 
-calc_osc(simple int sig, simple int len) =>
-    float bbBasis = ta.sma(close, sqz_bbLen)
-    float highestHigh = ta.highest(high, sqz_kcLen)
-    float lowestLow   = ta.lowest(low, sqz_kcLen)
-    float mean        = (highestHigh + lowestLow) / 2.0
-    float avg_line    = (bbBasis + mean) / 2.0
+calc_osc(bar b, simple int sig, simple int len) =>
+    float hl2         = bar_src(b, 'hl2')
+    float av          = ta.sma(hl2, len)
     float atr_primary = ta.atr(len)
-    float norm        = atr_primary > 0 ? (close - avg_line) / atr_primary * 100.0 : 0.0
+    float norm        = atr_primary > 0 ? (b.c - math.avg(hl2, av)) / atr_primary * 100.0 : 0.0
     float momentum    = ta.linreg(norm, len, 0)
     osc.new(momentum, ta.sma(momentum, sig))
 
 calc_dfo(bar _b, simple int len) =>
-    [plus_di, minus_di, _] = ta.dmi(len, len)
-    float fluxRaw = plus_di - minus_di
-    osc.new(fluxRaw, fluxRaw > +25 ? (fluxRaw - 25) : fluxRaw < -25 ? (fluxRaw + 25) : na)
+    int lenSafe = len > 0 ? len : 1
+    float trSmoothed = ta.rma(bar_atr(_b, 1), lenSafe)
+    float upComponent = ta.rma(math.max(ta.change(_b.h), 0.0), lenSafe)
+    float dnComponent = ta.rma(math.max(-ta.change(_b.l), 0.0), lenSafe)
+    float up = trSmoothed != 0.0 ? upComponent / trSmoothed : 0.0
+    float dn = trSmoothed != 0.0 ? dnComponent / trSmoothed : 0.0
+    float fluxBase = up + dn != 0.0 ? (up - dn) / (up + dn) : 0.0
+    int smoothLen = lenSafe / 2
+    if smoothLen < 1
+        smoothLen := 1
+    float fluxValue = ta.rma(fluxBase, smoothLen) * 100.0
+    osc.new(fluxValue, fluxValue > +25 ? (fluxValue - 25) : fluxValue < -25 ? (fluxValue + 25) : na)
 
 calc_sqz(bar b, simple int bbLen, simple int kcLen, simple float bbMult, simple float kcMult) =>
     array<bool> sqzArr = array.new_bool()
@@ -653,7 +659,7 @@ getPivots(int len) =>
 // --- 핵심 지표 계산 ---
 bar b = bar.new(open, high, low, close, bar_index)
 squeeze s = calc_sqz(b, sqz_bbLen, sqz_kcLen, sqz_bbMult, sqz_kcMult)
-osc     o = calc_osc(sig, len)
+osc     o = calc_osc(b, sig, len)
 osc     v = calc_dfo(bar_ha(b, dfh), dfl)
 float v_o_sm = dfSmoothLen > 1 ? ta.sma(v.o, dfSmoothLen) : v.o
 float v_s_sm = dfSmoothLen > 1 ? ta.sma(v.s, dfSmoothLen) : v.s
