@@ -559,31 +559,38 @@ var float pivotHighStop = na
 var float pivotLowStop  = na
 
 // --- 메소드 (함수) 정의 ---
-method src(bar b, simple string src) =>
-    float x = switch src
+bar_src(bar b, simple string src) =>
+    switch src
         'oc2'   => math.avg(b.o, b.c)
         'hl2'   => math.avg(b.h, b.l)
         'hlc3'  => math.avg(b.h, b.l, b.c)
         'ohlc4' => math.avg(b.o, b.h, b.l, b.c)
         'hlcc4' => math.avg(b.h, b.l, b.c, b.c)
-    x
-method ha(bar b, simple bool p = true) =>
+        => na
+
+bar_ha(bar b, simple bool p = true) =>
     var bar x = bar.new(na, na, na, na, na)
-    x.c := b.src('ohlc4')
-    x    := bar.new(na(x.o[1]) ? b.src('oc2') : nz(x.src('oc2')[1]), math.max(b.h, math.max(x.o, x.c)), math.min(b.l, math.min(x.o, x.c)), x.c, b.i)
+    x.c := bar_src(b, 'ohlc4')
+    x    := bar.new(na(x.o[1]) ? bar_src(b, 'oc2') : nz(bar_src(x, 'oc2')[1]), math.max(b.h, math.max(x.o, x.c)), math.min(b.l, math.min(x.o, x.c)), x.c, b.i)
     p ? x : b
-method atr(bar b, simple int len = 1) =>
+
+bar_atr(bar b, simple int len = 1) =>
     float tr = na(b.h[1]) ? (b.h - b.l) : math.max(math.max(b.h - b.l, math.abs(b.h - b.c[1])), math.abs(b.l - b.c[1]))
     len == 1 ? tr : ta.rma(tr, len)
-method stdev(float src, simple int len) =>
-    float sq  = 0., psq = 0., sum = 0.
-    for k = 0 to len - 1
-        val  = nz(src[k])
-        psq := sq
-        sq  += (val - sq) / (1 + k)
-        sum += (val - sq) * (val - psq)
-    math.sqrt(sum / (len - 1))
-method osc(bar b, simple int sig, simple int len) =>
+
+calc_stdev(series float src, simple int len) =>
+    if len <= 1
+        0.0
+    else
+        float sq  = 0., psq = 0., sum = 0.
+        for k = 0 to len - 1
+            float val = nz(src[k])
+            psq := sq
+            sq  += (val - sq) / (1 + k)
+            sum += (val - sq) * (val - psq)
+        math.sqrt(sum / (len - 1))
+
+calc_osc(simple int sig, simple int len) =>
     float bbBasis = ta.sma(close, sqz_bbLen)
     float highestHigh = ta.highest(high, sqz_kcLen)
     float lowestLow   = ta.lowest(low, sqz_kcLen)
@@ -593,18 +600,21 @@ method osc(bar b, simple int sig, simple int len) =>
     float norm        = atr_primary > 0 ? (close - avg_line) / atr_primary * 100.0 : 0.0
     float momentum    = ta.linreg(norm, len, 0)
     osc.new(momentum, ta.sma(momentum, sig))
-method dfo(bar b, simple int len) =>
+
+calc_dfo(bar _b, simple int len) =>
     [plus_di, minus_di, _] = ta.dmi(len, len)
     float fluxRaw = plus_di - minus_di
     osc.new(fluxRaw, fluxRaw > +25 ? (fluxRaw - 25) : fluxRaw < -25 ? (fluxRaw + 25) : na)
-method sqz(bar b, simple int bbLen, simple int kcLen, simple float bbMult, simple float kcMult) =>
+
+calc_sqz(bar b, simple int bbLen, simple int kcLen, simple float bbMult, simple float kcMult) =>
     array<bool> sqzArr = array.new_bool()
-    float dev  = b.c.stdev(bbLen) * bbMult
-    float atrv = b.atr(kcLen) * kcMult
+    float dev  = calc_stdev(b.c, bbLen) * bbMult
+    float atrv = bar_atr(b, kcLen) * kcMult
     for i = 2 to 4
         sqzArr.unshift(dev < (atrv * 0.25 * i))
     squeeze.new(sqzArr.pop(), sqzArr.pop(), sqzArr.pop())
-method draw(bar b, osc o, simple int trs, simple bool s) =>
+
+bar_draw(bar b, osc o, simple int trs, simple bool s) =>
     var divergence d = divergence.new()
     bool u = ta.crossunder(o.o, o.s)
     bool l = ta.crossover(o.o, o.s)
@@ -642,12 +652,12 @@ getPivots(int len) =>
 
 // --- 핵심 지표 계산 ---
 bar b = bar.new(open, high, low, close, bar_index)
-squeeze s = b.sqz(sqz_bbLen, sqz_kcLen, sqz_bbMult, sqz_kcMult)
-osc     o = b.osc(sig, len)
-osc     v = b.ha(dfh).dfo(dfl)
+squeeze s = calc_sqz(b, sqz_bbLen, sqz_kcLen, sqz_bbMult, sqz_kcMult)
+osc     o = calc_osc(sig, len)
+osc     v = calc_dfo(bar_ha(b, dfh), dfl)
 float v_o_sm = dfSmoothLen > 1 ? ta.sma(v.o, dfSmoothLen) : v.o
 float v_s_sm = dfSmoothLen > 1 ? ta.sma(v.s, dfSmoothLen) : v.s
-bool p = b.draw(o, trs, dbl)
+bool p = bar_draw(b, o, trs, dbl)
 gauge uG = gauge.new(+75, +70, v_o_sm > 0 and o.o > 0 ? cgp : v_o_sm > 0 or o.o > 0 ? color.new(cgp, 40) : colnt, gds == 'Both' or gds == 'Bull')
 gauge dG = gauge.new(-75, -70, v_o_sm < 0 and o.o < 0 ? cgn : v_o_sm < 0 or o.o < 0 ? color.new(cgn, 40) : colnt, gds == 'Both' or gds == 'Bear')
 
