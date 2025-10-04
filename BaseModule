@@ -1,0 +1,648 @@
+//@version=5
+// ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗
+// ║ KASIA — Pine Base Module (Risk/Guard/Wallet/Time/PnL/KCAS) [v3.0 • 2025-09-25]                                              ║
+// ║ Author: KASIA (for 나루)                                                                                                      ║
+// ║ Purpose: 고급 전략 공통 모듈 — 시간/리스크/가드/HUD/필터(HTF/Vol/Equity) 제공                                              ║
+// ╚══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝
+// License: MPL-2.0 derivative (free to use with attribution)
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// CHANGE LOG
+// 2025-09-25 (v3.0) - KCAS 업그레이드 통합
+//  • [New] 백테스트 시작일을 YYYY/MM/DD 입력으로 세분화, 거래 요일/세션(KST 포함) 필터 추가
+//  • [New] 월렛 적립 시스템 + 거래 가능 대금 산출, 드로우다운 스케일링, 성과 적응 리스크(PAR)
+//  • [New] 자본/일일/주간 손실 & 이익락 가드, 연패 차단, 청산가 선제 가드, 변동성(ATR) 가드
+//  • [New] HTF/VWAP/EMA 클라우드/기울기/Equity Slope 필터 및 유틸리티 함수 추가
+//  • [New] KCAS 스타일 HUD & Debugger 테이블, tradeAllowed 플래그에 모든 가드/필터 포함
+//  • [Update] 수량 계산 엔진: Risk-Based(손절 거리) vs Notional(USD/%), 슬리피지 버퍼 지원
+//  • [Compat] 리페인팅 방지를 위해 모든 HTF 시리즈는 [1] (확정봉) 사용
+//
+strategy('KASIA Base Module v3.0 (KCAS Upgrade)',
+         shorttitle='KASIA v3.0',
+         overlay=true,
+         initial_capital=1000,
+         currency=currency.USD,
+         commission_type=strategy.commission.percent,
+         commission_value=0.06,
+         process_orders_on_close=true,
+         pyramiding=0,
+         calc_on_every_tick=true,
+         calc_on_order_fills=true,
+         max_lines_count=500,
+         max_labels_count=500)
+
+// ─ CONSTANTS ─────────────────────────────────────────────────────────────────
+var GRP_TIME   = 'A) 시간 & 세션'
+var GRP_RISK   = 'B) 리스크 & 월렛'
+var GRP_GUARD  = 'C) 자본/거래 가드'
+var GRP_CTX    = 'D) 시장 컨텍스트 필터'
+var GRP_FILTER = 'E) 모멘텀/구조 필터'
+var GRP_SL     = 'F) 손절 & 유틸'
+var GRP_HUD    = 'G) HUD & 디버거'
+var GRP_DEMO   = 'H) 데모 테스트 로직'
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║ Section 1: 입력값                                                         ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+// ─ 시간 & 세션 ───────────────────────────────────────────────────────────────
+startYear   = input.int(2024, '백테스트 시작 연도', minval=2017, group=GRP_TIME)
+startMonth  = input.int(1,   '백테스트 시작 월',   minval=1, maxval=12, group=GRP_TIME)
+startDay    = input.int(1,   '백테스트 시작 일',   minval=1, maxval=31, group=GRP_TIME)
+startTs     = timestamp(syminfo.timezone, startYear, startMonth, startDay, 0, 0)
+
+useSessionFilter = input.bool(true, '기본 세션 필터 사용', group=GRP_TIME)
+primarySession   = input.session('0830-0200', '기본 세션 (거래소 로컬)', group=GRP_TIME)
+
+useKstSession = input.bool(true, '한국시간 세션 필터', group=GRP_TIME)
+kstSession   = input.session('0930-0200', '한국시간 세션', group=GRP_TIME)
+
+useDayFilter = input.bool(true, '요일 필터 사용', group=GRP_TIME)
+monOk = input.bool(true,  '월', inline='dow1', group=GRP_TIME)
+tueOk = input.bool(true,  '화', inline='dow1', group=GRP_TIME)
+wedOk = input.bool(true,  '수', inline='dow1', group=GRP_TIME)
+thuOk = input.bool(true,  '목', inline='dow1', group=GRP_TIME)
+friOk = input.bool(true,  '금', inline='dow2', group=GRP_TIME)
+satOk = input.bool(false, '토', inline='dow2', group=GRP_TIME)
+sunOk = input.bool(false, '일', inline='dow2', group=GRP_TIME)
+
+// ─ 리스크 & 월렛 ────────────────────────────────────────────────────────────
+positionSizingMode = input.string('Risk-Based', '사이징 엔진', options=['Risk-Based', 'Notional'], group=GRP_RISK, tooltip='Risk-Based: 손절 거리 기반 R 관리 / Notional: 고정 달러 또는 자산 %')
+riskSizingType     = input.string('Fixed Fractional', '리스크 포지션 타입', options=['Fixed Fractional', 'Fixed Lot'], group=GRP_RISK)
+baseRiskPct        = input.float(0.6, '기본 리스크 %', step=0.05, minval=0.1, group=GRP_RISK)
+fixedContractSize  = input.float(1.0, '고정 계약 수량', step=0.1, minval=0.001, group=GRP_RISK)
+
+leverage           = input.float(15.0, '레버리지', minval=1, maxval=50, step=0.1, group=GRP_RISK)
+slipTicks          = input.int(1, '슬리피지 (틱)', minval=0, maxval=50, group=GRP_RISK)
+var float tickSize = syminfo.mintick
+slipBuffer         = tickSize * slipTicks
+
+notionalSizingType  = input.string('Equity %', '노션널 기준', options=['Fixed USD', 'Equity %'], group=GRP_RISK)
+notionalSizingValue = input.float(80.0, '노션널 값 (USD 또는 %)', minval=1, group=GRP_RISK)
+
+useWallet          = input.bool(true, '월렛 시스템 사용', group=GRP_RISK)
+profitReservePct   = input.float(20.0, '수익 적립 비율 %', minval=0.0, maxval=100.0, step=1.0, group=GRP_RISK) / 100.0
+applyReserveToSizing = input.bool(true, '적립금 제외 후 사이징', group=GRP_RISK)
+minTradableCapital = input.float(300.0, '최소 거래 가능 자본 ($)', minval=50, group=GRP_RISK)
+
+useDrawdownScaling  = input.bool(true, '드로우다운 리스크 축소', group=GRP_RISK)
+drawdownTriggerPct  = input.float(7.0, '드로우다운 트리거 %', minval=1, maxval=50, group=GRP_RISK)
+drawdownRiskScale   = input.float(0.5, '드로우다운 리스크 배율', minval=0.1, maxval=1.0, step=0.05, group=GRP_RISK)
+
+usePerfAdaptiveRisk = input.bool(true, '성과 적응 리스크 (PAR)', group=GRP_RISK)
+parLookback         = input.int(6, 'PAR 거래 수 집계', minval=2, maxval=20, group=GRP_RISK)
+parMinTrades        = input.int(3, 'PAR 최소 거래 수', minval=1, maxval=20, group=GRP_RISK)
+parHotWinRate       = input.float(65.0, '핫스트릭 승률 %', minval=40, maxval=90, step=0.5, group=GRP_RISK)
+parColdWinRate      = input.float(35.0, '콜드스트릭 승률 %', minval=5, maxval=60, step=0.5, group=GRP_RISK)
+parHotRiskMult      = input.float(1.25, '핫스트릭 리스크 배율', minval=1.0, maxval=2.0, step=0.05, group=GRP_RISK)
+parColdRiskMult     = input.float(0.35, '콜드스트릭 리스크 배율', minval=0.0, maxval=1.0, step=0.05, group=GRP_RISK)
+parPauseOnCold      = input.bool(true, '콜드스트릭 시 진입 중지', group=GRP_RISK)
+
+// ─ 자본/거래 가드 ──────────────────────────────────────────────────────────
+useCapitalGuard     = input.bool(true, '자본 가드', group=GRP_GUARD)
+capitalGuardPct     = input.float(18.0, '자본 드로우다운 한도 %', minval=1, maxval=100, step=1, group=GRP_GUARD)
+
+useDailyLossGuard   = input.bool(true, '일일 손실 가드', group=GRP_GUARD)
+dailyLossThreshold  = input.float(80, '일일 손실 한도 ($)', minval=10, group=GRP_GUARD)
+useDailyProfitLock  = input.bool(true, '일일 이익 잠금', group=GRP_GUARD)
+dailyProfitTarget   = input.float(120, '일일 이익 목표 ($)', minval=0, group=GRP_GUARD)
+useWeeklyProfitLock = input.bool(true, '주간 이익 잠금', group=GRP_GUARD)
+weeklyProfitTarget  = input.float(250, '주간 이익 목표 ($)', minval=0, group=GRP_GUARD)
+
+useLossStreakGuard  = input.bool(true, '연패 중지 가드', group=GRP_GUARD)
+maxConsecutiveLosses = input.int(3, '최대 연속 손실 횟수', minval=1, maxval=10, group=GRP_GUARD)
+
+useGuardExit        = input.bool(true, '청산가 선제 가드', group=GRP_GUARD)
+maintenanceMarginPct = input.float(0.5, '유지 증거금 %', minval=0.1, step=0.05, group=GRP_GUARD)
+preemptTicks        = input.int(8, '선제 청산 틱', minval=0, maxval=50, group=GRP_GUARD)
+
+maxDailyLosses      = input.int(3, '일일 최대 손실 거래 수', minval=0, group=GRP_GUARD)
+maxWeeklyDD         = input.float(9.0, '주간 최대 드로우다운 %', minval=0, group=GRP_GUARD)
+maxGuardFires       = input.int(4, '청산 가드 최대 발동', minval=0, group=GRP_GUARD)
+
+useVolatilityGuard  = input.bool(true, 'ATR 변동성 가드', group=GRP_GUARD)
+volatilityLookback  = input.int(50, 'ATR %% 기간', minval=10, maxval=200, group=GRP_GUARD)
+volatilityLowerPct  = input.float(0.15, 'ATR %% 하한', minval=0.05, step=0.05, group=GRP_GUARD)
+volatilityUpperPct  = input.float(2.5, 'ATR %% 상한', minval=0.2, step=0.05, group=GRP_GUARD)
+
+// ─ 시장 컨텍스트 필터 ──────────────────────────────────────────────────────
+useRegimeFilter = input.bool(true, '상위봉 레짐 필터', group=GRP_CTX)
+htfTf           = input.timeframe('240', '상위봉 타임프레임', group=GRP_CTX)
+htfEmaLen       = input.int(120, '상위봉 EMA 길이', minval=20, maxval=400, group=GRP_CTX)
+htfAdxLen       = input.int(14, '상위봉 ADX 길이', minval=5, maxval=50, group=GRP_CTX)
+htfAdxTh        = input.float(22, '상위봉 ADX 임계값', minval=5, maxval=50, step=0.5, group=GRP_CTX)
+htfRsiLen       = input.int(21, '상위봉 RSI 길이', minval=5, maxval=50, group=GRP_CTX)
+
+useVWAPFilter   = input.bool(true, 'VWAP 필터', group=GRP_CTX)
+useMicroTrend   = input.bool(true, 'EMA 클라우드 (Micro Trend)', group=GRP_CTX)
+emaFastLenBase  = input.int(21, 'EMA 빠른선 기본', minval=5, maxval=100, group=GRP_CTX)
+emaSlowLenBase  = input.int(55, 'EMA 느린선 기본', minval=10, maxval=200, group=GRP_CTX)
+
+useRangeFilter  = input.bool(true, '레인지 차단', group=GRP_CTX)
+rangeLen        = input.int(36, '레인지 기준 봉수', minval=5, maxval=200, group=GRP_CTX)
+rangeAtrMult    = input.float(1.4, '레인지 ATR 배수', minval=0.5, maxval=5, step=0.1, group=GRP_CTX)
+
+useDistanceGuard = input.bool(true, '가격 이격 가드', group=GRP_CTX)
+distanceAtrLen   = input.int(21, '이격 ATR 길이', minval=5, maxval=200, group=GRP_CTX)
+distanceMaxAtr   = input.float(2.4, '최대 이격 (ATR)', minval=0.5, maxval=5, step=0.1, group=GRP_CTX)
+
+useSlopeFilter   = input.bool(true, 'EMA 기울기 필터', group=GRP_CTX)
+slopeLookback    = input.int(8, '기울기 룩백', minval=1, maxval=50, group=GRP_CTX)
+slopeMinPct      = input.float(0.06, '최소 기울기 (%)', minval=0.0, maxval=1.0, step=0.01, group=GRP_CTX)
+
+useTrendBias     = input.bool(true, '추세 EMA 필터', group=GRP_CTX)
+trendLenBase     = input.int(200, '추세 EMA 기본', minval=20, maxval=400, group=GRP_CTX)
+useConfBias      = input.bool(true, '확인 EMA 필터', group=GRP_CTX)
+confLenBase      = input.int(55, '확인 EMA 기본', minval=10, maxval=300, group=GRP_CTX)
+
+// ─ 모멘텀/구조 필터 ───────────────────────────────────────────────────────
+useMomConfirm   = input.bool(true, '모멘텀 확증 사용', group=GRP_FILTER)
+bbLen           = input.int(18, '볼린저 길이', minval=10, maxval=100, group=GRP_FILTER)
+bbMult          = input.float(1.2, '볼린저 배수', minval=0.5, maxval=5, step=0.1, group=GRP_FILTER)
+kcLen           = input.int(21, '켈트너 길이', minval=10, maxval=100, group=GRP_FILTER)
+
+useCHoCH        = input.bool(true, 'CHoCH 확인 사용', group=GRP_FILTER)
+pL              = input.int(2, '피벗 좌', minval=1, maxval=20, group=GRP_FILTER)
+pR              = input.int(3, '피벗 우', minval=1, maxval=20, group=GRP_FILTER)
+
+useVolumeFilter = input.bool(true, '거래량 스파이크 필터', group=GRP_FILTER)
+volumeLookback  = input.int(34, '거래량 평균 기간', minval=5, maxval=200, group=GRP_FILTER)
+volumeMultiplier = input.float(1.3, '거래량 배수', minval=1.0, maxval=5.0, step=0.1, group=GRP_FILTER)
+
+useCandleFilter = input.bool(true, '캔들 모멘텀 필터', group=GRP_FILTER)
+candleBodyRatio = input.float(55, '몸통 비율 %', minval=10, maxval=99, step=1, group=GRP_FILTER)
+
+useRSIShift     = input.bool(true, '상위봉 RSI 바이어스', group=GRP_FILTER)
+rsiBullBand     = input.float(52, 'RSI 강세 기준', minval=40, maxval=70, step=0.5, group=GRP_FILTER)
+rsiBearBand     = input.float(48, 'RSI 약세 기준', minval=30, maxval=60, step=0.5, group=GRP_FILTER)
+
+useEquitySlopeFilter = input.bool(true, '순자산 기울기 필터', group=GRP_FILTER)
+eqSlopeLen      = input.int(120, '순자산 기울기 길이', minval=20, maxval=500, group=GRP_FILTER)
+
+// ─ 손절 & 유틸 ────────────────────────────────────────────────────────────
+usePivotSL    = input.bool(true, '피벗 손절 사용', group=GRP_SL)
+pivLeft       = input.int(4, '피벗 좌', minval=1, maxval=20, group=GRP_SL)
+pivRight      = input.int(4, '피벗 우', minval=1, maxval=20, group=GRP_SL)
+atrLenSL      = input.int(14, 'ATR 손절 길이', minval=5, maxval=100, group=GRP_SL)
+atrBufferMult = input.float(0.25, 'ATR 버퍼 배수', minval=0, maxval=2, step=0.05, group=GRP_SL)
+
+// ─ HUD & 디버거 ────────────────────────────────────────────────────────────
+showHUD       = input.bool(true, 'HUD 표시', group=GRP_HUD)
+showDebugger  = input.bool(true, '디버거 표시', group=GRP_HUD)
+hudPosition   = input.string('Top Right', 'HUD 위치', options=['Top Left', 'Top Right', 'Middle Left', 'Middle Right', 'Bottom Left', 'Bottom Right'], group=GRP_HUD)
+
+eodClose      = input.bool(true, '세션 종료 시 청산', group=GRP_HUD)
+eodTime       = input.string('02:05', '청산 시간 (HH:MM)', group=GRP_HUD)
+
+// ─ 데모 테스트 로직 ───────────────────────────────────────────────────────
+useDemoLogic = input.bool(false, '데모 RSI 진입 로직 실행', group=GRP_DEMO)
+rsiLenDemo   = input.int(14, '데모 RSI 길이', group=GRP_DEMO, minval=1)
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║ Section 2: 코어 계산                                                      ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+// ─ 시간 계산 ────────────────────────────────────────────────────────────────
+isBacktestWindow = time >= startTs
+sessionAllowed   = not useSessionFilter or not na(time(timeframe.period, primarySession))
+kstAllowed       = not useKstSession or not na(time(timeframe.period, kstSession, 'Asia/Seoul'))
+
+getDayChar() =>
+    dayofweek == dayofweek.monday    ? '월' :
+    dayofweek == dayofweek.tuesday   ? '화' :
+    dayofweek == dayofweek.wednesday ? '수' :
+    dayofweek == dayofweek.thursday  ? '목' :
+    dayofweek == dayofweek.friday    ? '금' :
+    dayofweek == dayofweek.saturday  ? '토' : '일'
+
+dayChar = getDayChar()
+
+isDayEnabled(d) =>
+    (d == '월' and monOk) or
+    (d == '화' and tueOk) or
+    (d == '수' and wedOk) or
+    (d == '목' and thuOk) or
+    (d == '금' and friOk) or
+    (d == '토' and satOk) or
+    (d == '일' and sunOk)
+
+isDayAllowed = not useDayFilter or isDayEnabled(dayChar)
+
+// ─ 월렛 & 자본 추적 ────────────────────────────────────────────────────────
+var float tradableCapital = strategy.initial_capital
+var float withdrawable    = 0.0
+var float peakEquity      = strategy.initial_capital
+
+if barstate.isconfirmed
+    newProfit = strategy.netprofit - nz(strategy.netprofit[1])
+    if useWallet and newProfit > 0
+        withdrawable += newProfit * profitReservePct
+    effectiveEquity = useWallet and applyReserveToSizing ? strategy.equity - withdrawable : strategy.equity
+    tradableCapital := math.max(effectiveEquity, strategy.initial_capital * 0.01)
+    peakEquity := math.max(peakEquity, strategy.equity)
+
+// ─ 리스크 조절 ──────────────────────────────────────────────────────────────
+currentDD      = peakEquity > 0 ? (peakEquity - strategy.equity) / peakEquity * 100 : 0.0
+scaledRiskPct  = useDrawdownScaling and currentDD > drawdownTriggerPct ? baseRiskPct * drawdownRiskScale : baseRiskPct
+
+var float recentTradeResults[] = array.new_float()
+var int lastClosedCount = 0
+closedCount = strategy.closedtrades
+if usePerfAdaptiveRisk and closedCount > lastClosedCount
+    for idx = lastClosedCount to closedCount - 1
+        tradeProfit = strategy.closedtrades.profit(idx)
+        array.push(recentTradeResults, tradeProfit)
+        if array.size(recentTradeResults) > parLookback
+            array.shift(recentTradeResults)
+    lastClosedCount := closedCount
+else if not usePerfAdaptiveRisk
+    lastClosedCount := closedCount
+
+recentTrades = array.size(recentTradeResults)
+recentWins   = 0
+recentLosses = 0
+if usePerfAdaptiveRisk and recentTrades > 0
+    for i = 0 to recentTrades - 1
+        plTrade = array.get(recentTradeResults, i)
+        recentWins   += plTrade > 0 ? 1 : 0
+        recentLosses += plTrade < 0 ? 1 : 0
+
+recentWinRate = usePerfAdaptiveRisk and recentTrades > 0 ? recentWins / recentTrades * 100.0 : na
+isHotStreak   = usePerfAdaptiveRisk and not na(recentWinRate) and recentTrades >= parMinTrades and recentWinRate >= parHotWinRate
+isColdStreak  = usePerfAdaptiveRisk and not na(recentWinRate) and recentTrades >= parMinTrades and recentWinRate <= parColdWinRate
+perfRiskMult  = usePerfAdaptiveRisk ? (isHotStreak ? parHotRiskMult : isColdStreak ? parColdRiskMult : 1.0) : 1.0
+finalRiskPct  = scaledRiskPct * perfRiskMult
+
+parStateLabel = not usePerfAdaptiveRisk ? 'OFF' : isHotStreak ? 'HOT' : isColdStreak ? 'COLD' : 'NEUTRAL'
+parWinLabel   = na(recentWinRate) ? '-' : str.tostring(recentWinRate, '##.##') + '%'
+
+// ─ 가드 변수 ───────────────────────────────────────────────────────────────
+useVolGuardRange(float atrPctVal) => not useVolatilityGuard or (atrPctVal >= volatilityLowerPct and atrPctVal <= volatilityUpperPct)
+
+var float dailyStartCapital = tradableCapital
+var float dailyPeakCapital  = tradableCapital
+var bool  isGuardHalted     = false
+varip int guardFiredTotal   = 0
+varip int dailyLosses       = 0
+varip float weekPeakEquity  = strategy.initial_capital
+varip float weekStartEquity = strategy.initial_capital
+varip int lossStreak        = 0
+
+atrStop = ta.atr(atrLenSL)
+atrPct  = close != 0 ? ta.atr(volatilityLookback) / close * 100.0 : 0.0
+isVolatilityOK = useVolGuardRange(atrPct)
+
+aNewDay = ta.change(dayofmonth) != 0
+if aNewDay
+    dailyStartCapital := tradableCapital
+    dailyPeakCapital  := tradableCapital
+    isGuardHalted     := false
+    dailyLosses       := 0
+
+aNewWeek = ta.change(weekofyear) != 0
+if aNewWeek
+    weekPeakEquity  := strategy.equity
+    weekStartEquity := strategy.equity
+else
+    weekPeakEquity := math.max(weekPeakEquity, strategy.equity)
+
+dailyPeakCapital := math.max(dailyPeakCapital, tradableCapital)
+dailyPnl         = tradableCapital - dailyStartCapital
+weeklyDD         = weekPeakEquity > 0 ? (weekPeakEquity - strategy.equity) / weekPeakEquity * 100.0 : 0.0
+weeklyPnl        = strategy.equity - weekStartEquity
+
+isDailyLossBreached = useDailyLossGuard and dailyPnl <= -dailyLossThreshold
+if isDailyLossBreached
+    isGuardHalted := true
+
+dailyProfitReached  = useDailyProfitLock and dailyPnl >= dailyProfitTarget
+weeklyProfitReached = useWeeklyProfitLock and weeklyPnl >= weeklyProfitTarget
+
+if strategy.losstrades > strategy.losstrades[1]
+    dailyLosses += 1
+    lossStreak  += 1
+if strategy.wintrades > strategy.wintrades[1]
+    lossStreak := 0
+
+// ─ 청산가 계산 ─────────────────────────────────────────────────────────────
+kasia_guard_price(entryPrice, direction, qty) =>
+    if qty == 0.0
+        entryPrice
+    else
+        initialMargin = (qty * entryPrice) / leverage
+        maintMargin   = (qty * entryPrice) * (maintenanceMarginPct / 100.0)
+        offset        = (initialMargin - maintMargin) / qty
+        direction == 1 ? entryPrice - offset : entryPrice + offset
+
+if useGuardExit and strategy.position_size != 0
+    guardEntryPrice = strategy.position_avg_price
+    guardDirection  = strategy.position_size > 0 ? 1 : -1
+    guardQty        = math.abs(strategy.position_size)
+    liqPrice        = kasia_guard_price(guardEntryPrice, guardDirection, guardQty)
+    preemptPrice    = guardDirection == 1 ? liqPrice + preemptTicks * tickSize : liqPrice - preemptTicks * tickSize
+    hitGuard        = guardDirection == 1 ? low <= preemptPrice : high >= preemptPrice
+    if hitGuard
+        strategy.close_all(comment='Guard Exit')
+        guardFiredTotal += 1
+
+stop_by_losses = maxDailyLosses > 0 and dailyLosses >= maxDailyLosses
+stop_by_dd     = maxWeeklyDD > 0 and weeklyDD >= maxWeeklyDD
+stop_by_guard  = maxGuardFires > 0 and guardFiredTotal >= maxGuardFires
+stop_by_capital = tradableCapital < minTradableCapital
+stop_by_streak  = useLossStreakGuard and lossStreak >= maxConsecutiveLosses
+stop_by_perf    = usePerfAdaptiveRisk and parPauseOnCold and isColdStreak
+stop_by_profit  = dailyProfitReached or weeklyProfitReached
+
+isCapitalBreached = useCapitalGuard and strategy.equity < strategy.initial_capital * (1 - capitalGuardPct / 100.0)
+
+// ─ 필터 계산 (레짐 & 모멘텀) ──────────────────────────────────────────────
+htfRsiSeries = request.security(syminfo.tickerid, htfTf, ta.rsi(close, htfRsiLen))
+htfRsi       = htfRsiSeries[1]
+
+emaFast = ta.ema(close, emaFastLenBase)
+emaSlow = ta.ema(close, emaSlowLenBase)
+microTrendLong = not useMicroTrend or emaFast > emaSlow
+microTrendShort = not useMicroTrend or emaFast < emaSlow
+
+maTrend = ta.ema(close, trendLenBase)
+maConf  = ta.ema(close, confLenBase)
+trendBiasLongOK  = not useTrendBias or close > maTrend
+trendBiasShortOK = not useTrendBias or close < maTrend
+confBiasLongOK   = not useConfBias or close > maConf
+confBiasShortOK  = not useConfBias or close < maConf
+
+prevTrend = nz(maTrend[slopeLookback], maTrend)
+slopePct  = maTrend != 0 ? (maTrend - prevTrend) / maTrend * 100.0 : 0.0
+slopeOK_L = not useSlopeFilter or slopePct >= slopeMinPct
+slopeOK_S = not useSlopeFilter or slopePct <= -slopeMinPct
+
+rangeHigh = ta.highest(high, rangeLen)
+rangeLow  = ta.lowest(low, rangeLen)
+rangeAtr  = ta.atr(rangeLen)
+isRanging = (rangeHigh - rangeLow) < rangeAtr * rangeAtrMult
+rangeOK   = not useRangeFilter or not isRanging
+
+htfEmaSeries = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen))
+htfEma       = htfEmaSeries[1]
+htfAdxSeries = request.security(syminfo.tickerid, htfTf, ta.adx(htfAdxLen))
+htfAdx       = htfAdxSeries[1]
+
+htfLong = not useRegimeFilter or (close > htfEma and htfAdx > htfAdxTh)
+htfShort = not useRegimeFilter or (close < htfEma and htfAdx > htfAdxTh)
+
+vwap = ta.vwap
+vwapLong  = not useVWAPFilter or close >= vwap
+vwapShort = not useVWAPFilter or close <= vwap
+
+atrDistance = ta.atr(distanceAtrLen)
+vwDistance  = atrDistance > 0 ? math.abs(close - vwap) / atrDistance : 0.0
+trendDistance = atrDistance > 0 ? math.abs(close - maTrend) / atrDistance : 0.0
+
+distanceOK_L = not useDistanceGuard or (vwDistance <= distanceMaxAtr and trendDistance <= distanceMaxAtr)
+distanceOK_S = distanceOK_L
+
+bbBasis = ta.sma(close, bbLen)
+bbDev   = bbMult * ta.stdev(close, bbLen)
+bbUpper = bbBasis + bbDev
+bbLower = bbBasis - bbDev
+kcRange = ta.atr(kcLen) * bbMult
+squeezeOn = (bbUpper - bbLower) < kcRange
+mom = ta.linreg(close - bbBasis, 14, 0)
+momOK_L = not useMomConfirm or (mom > 0 and (not squeezeOn or ta.crossover(mom, 0)))
+momOK_S = not useMomConfirm or (mom < 0 and (not squeezeOn or ta.crossunder(mom, 0)))
+
+ph = ta.pivothigh(high, pL, pR)
+pl = ta.pivotlow(low, pL, pR)
+lastHigh = ta.valuewhen(not na(ph), ph, 0)
+lastLow  = ta.valuewhen(not na(pl), pl, 0)
+bullCHoCH = not na(lastHigh) and not na(lastLow) and close > lastHigh and low > lastLow
+bearCHoCH = not na(lastHigh) and not na(lastLow) and close < lastLow and high < lastHigh
+chochOK_L = not useCHoCH or bullCHoCH
+chochOK_S = not useCHoCH or bearCHoCH
+
+avgVolume      = ta.sma(volume, volumeLookback)
+isVolumeSpike  = avgVolume > 0 ? volume >= avgVolume * volumeMultiplier : false
+volumeOK       = not useVolumeFilter or isVolumeSpike
+
+bodySize = math.abs(close - open)
+fullSize = high - low
+isMomentumCandle = fullSize > 0 and bodySize / fullSize * 100 >= candleBodyRatio
+candleOK        = not useCandleFilter or isMomentumCandle
+
+rsiShiftOK_L = not useRSIShift or htfRsi >= rsiBullBand
+rsiShiftOK_S = not useRSIShift or htfRsi <= rsiBearBand
+
+eqSlope = ta.linreg(strategy.equity, eqSlopeLen, 0) - ta.linreg(strategy.equity, eqSlopeLen, 1)
+equitySlopeOK_L = not useEquitySlopeFilter or eqSlope >= 0
+equitySlopeOK_S = not useEquitySlopeFilter or eqSlope <= 0
+
+contextLongOK = microTrendLong and trendBiasLongOK and confBiasLongOK and slopeOK_L and rangeOK and vwapLong and distanceOK_L and momOK_L and chochOK_L and volumeOK and candleOK and rsiShiftOK_L and htfLong and equitySlopeOK_L
+contextShortOK = microTrendShort and trendBiasShortOK and confBiasShortOK and slopeOK_S and rangeOK and vwapShort and distanceOK_S and momOK_S and chochOK_S and volumeOK and candleOK and rsiShiftOK_S and htfShort and equitySlopeOK_S
+
+// ─ 손절 보조 ──────────────────────────────────────────────────────────────
+var float pivLowCache  = na
+var float pivHighCache = na
+if usePivotSL
+    lastPivotLow  = ta.valuewhen(not na(ta.pivotlow(low, pivLeft, pivRight)), ta.pivotlow(low, pivLeft, pivRight), 0)
+    lastPivotHigh = ta.valuewhen(not na(ta.pivothigh(high, pivLeft, pivRight)), ta.pivothigh(high, pivLeft, pivRight), 0)
+    if not na(lastPivotLow)
+        pivLowCache := lastPivotLow - atrBufferMult * atrStop
+    if not na(lastPivotHigh)
+        pivHighCache := lastPivotHigh + atrBufferMult * atrStop
+
+// ─ 수량 계산 헬퍼 ──────────────────────────────────────────────────────────
+calcNotionalQty() =>
+    baseEquity = tradableCapital
+    sizeUsd = notionalSizingType == 'Fixed USD' ? notionalSizingValue : baseEquity * (notionalSizingValue / 100.0)
+    riskScale = baseRiskPct > 0 ? finalRiskPct / baseRiskPct : 1.0
+    adjSizeUsd = math.max(sizeUsd * riskScale, 0.0)
+    close > 0 ? (adjSizeUsd * leverage) / close : na
+
+calcRiskQty(stopDistance) =>
+    if na(stopDistance) or stopDistance <= 0
+        na
+    else
+        riskSizingType == 'Fixed Fractional' ? (tradableCapital * finalRiskPct / 100.0) / stopDistance : fixedContractSize
+
+calcPositionQty(stopDistance) =>
+    qtyRisk = calcRiskQty(stopDistance)
+    qtyNotional = calcNotionalQty()
+    qtySelected = positionSizingMode == 'Risk-Based' ? qtyRisk : qtyNotional
+    na(qtySelected) ? 0.0 : math.max(qtySelected, 0.0)
+
+// ─ 거래 허용 여부 ─────────────────────────────────────────────────────────
+isTimeAllowed = isBacktestWindow and sessionAllowed and kstAllowed and isDayAllowed
+haltReasons = isCapitalBreached or isGuardHalted or stop_by_losses or stop_by_dd or stop_by_guard or stop_by_capital or stop_by_streak or stop_by_perf or stop_by_profit
+canTrade     = isTimeAllowed and not haltReasons and isVolatilityOK
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║ Section 3: 데모 전략 (옵션)                                              ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+if useDemoLogic
+    demoRsi = ta.rsi(close, rsiLenDemo)
+    longCond  = ta.crossover(demoRsi, 30)
+    shortCond = ta.crossunder(demoRsi, 70)
+
+    if strategy.position_size == 0 and canTrade
+        if longCond and contextLongOK
+            stopLevel = usePivotSL and not na(pivLowCache) ? math.min(close - atrStop, pivLowCache) : close - atrStop
+            stopDist  = close - stopLevel
+            qty       = calcPositionQty(stopDist + slipBuffer)
+            if qty > 0
+                strategy.entry('Demo Long', strategy.long, qty=qty)
+                strategy.exit('Demo Long SL', from_entry='Demo Long', stop=stopLevel)
+        if shortCond and contextShortOK
+            stopLevel = usePivotSL and not na(pivHighCache) ? math.max(close + atrStop, pivHighCache) : close + atrStop
+            stopDist  = stopLevel - close
+            qty       = calcPositionQty(stopDist + slipBuffer)
+            if qty > 0
+                strategy.entry('Demo Short', strategy.short, qty=qty)
+                strategy.exit('Demo Short SL', from_entry='Demo Short', stop=stopLevel)
+
+// EOD 강제 청산
+if eodClose and strategy.position_size != 0
+    eodHour = str.tonumber(str.substring(eodTime, 0, 2))
+    eodMinute = str.tonumber(str.substring(eodTime, 3, 5))
+    if hour == eodHour and minute >= eodMinute
+        strategy.close_all(comment='EOD Close')
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║ Section 4: 시각화                                                         ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+plot(useMicroTrend ? emaFast : na, 'EMA 빠른선', color=color.new(color.aqua, 0))
+plot(useMicroTrend ? emaSlow : na, 'EMA 느린선', color=color.new(color.orange, 0))
+plot(usePivotSL ? pivLowCache : na, 'Pivot SL Long', color=color.new(color.red, 0), style=plot.style_linebr)
+plot(usePivotSL ? pivHighCache : na, 'Pivot SL Short', color=color.new(color.red, 0), style=plot.style_linebr)
+plot(useVWAPFilter ? vwap : na, 'VWAP', color=color.new(color.yellow, 40))
+
+// ─ HUD ─────────────────────────────────────────────────────────────────────
+if showHUD and barstate.islast
+    posMap = switch hudPosition
+        'Top Left' => position.top_left
+        'Top Right' => position.top_right
+        'Middle Left' => position.middle_left
+        'Middle Right' => position.middle_right
+        'Bottom Left' => position.bottom_left
+        'Bottom Right' => position.bottom_right
+
+    var table hud = table.new(posMap, 2, 13, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
+    f_str(val) => str.tostring(val, format.mintick)
+
+    table.cell(hud, 0, 0, 'KCAS Base HUD', text_color=color.white, bgcolor=color.new(color.purple, 20))
+    table.cell(hud, 1, 0, '', bgcolor=color.new(color.purple, 20))
+    table.merge_cells(hud, 0, 0, 1, 0)
+
+    table.cell(hud, 0, 1, '거래 가능 자본', text_color=color.white)
+    table.cell(hud, 1, 1, f_str(tradableCapital), text_color=color.aqua)
+
+    table.cell(hud, 0, 2, '적립된 수익', text_color=color.white)
+    table.cell(hud, 1, 2, f_str(withdrawable), text_color=color.yellow)
+
+    winrate = strategy.wintrades + strategy.losstrades == 0 ? 0 : strategy.wintrades / (strategy.wintrades + strategy.losstrades) * 100
+    totalPnlColor = strategy.netprofit >= 0 ? color.lime : color.red
+    table.cell(hud, 0, 3, '승률 / 누적 PnL', text_color=color.white)
+    table.cell(hud, 1, 3, str.tostring(winrate, '##.##') + '% / ' + f_str(strategy.netprofit), text_color=totalPnlColor)
+
+    dailyTargetTxt = useDailyProfitLock ? f_str(dailyProfitTarget) : 'OFF'
+    dailyTargetColor = dailyProfitReached ? color.lime : dailyPnl >= 0 ? color.aqua : color.red
+    table.cell(hud, 0, 4, '일일 PnL / 목표', text_color=color.white)
+    table.cell(hud, 1, 4, f_str(dailyPnl) + ' / ' + dailyTargetTxt, text_color=dailyTargetColor, bgcolor=color.new(dailyTargetColor, dailyProfitReached ? 40 : 75))
+
+    weeklyTargetTxt = useWeeklyProfitLock ? f_str(weeklyProfitTarget) : 'OFF'
+    weeklyTargetColor = weeklyProfitReached ? color.lime : weeklyPnl >= 0 ? color.aqua : color.red
+    table.cell(hud, 0, 5, '주간 PnL / 목표', text_color=color.white)
+    table.cell(hud, 1, 5, f_str(weeklyPnl) + ' / ' + weeklyTargetTxt, text_color=weeklyTargetColor, bgcolor=color.new(weeklyTargetColor, weeklyProfitReached ? 40 : 75))
+
+    atrStatusColor = isVolatilityOK ? color.new(color.aqua, 60) : color.new(color.red, 40)
+    table.cell(hud, 0, 6, 'ATR% 상태', text_color=color.white)
+    table.cell(hud, 1, 6, str.tostring(atrPct, '##.##') + '% / ' + str.tostring(volatilityLowerPct, '##.##') + '%-' + str.tostring(volatilityUpperPct, '##.##') + '%', text_color=isVolatilityOK ? color.aqua : color.red, bgcolor=atrStatusColor)
+
+    haltText  = haltReasons ? '중지' : '가동'
+    haltColor = haltReasons ? color.red : color.green
+    table.cell(hud, 0, 7, '거래 상태', text_color=color.white)
+    table.cell(hud, 1, 7, haltText, text_color=color.white, bgcolor=color.new(haltColor, 60))
+
+    maxDailyTxt = maxDailyLosses > 0 ? str.tostring(maxDailyLosses) : '∞'
+    table.cell(hud, 0, 8, '일일 손실', text_color=color.white)
+    table.cell(hud, 1, 8, str.tostring(dailyLosses) + '/' + maxDailyTxt, text_color=stop_by_losses ? color.red : color.white)
+
+    table.cell(hud, 0, 9, '주간 DD', text_color=color.white)
+    table.cell(hud, 1, 9, str.tostring(weeklyDD, '##.##') + '% / ' + str.tostring(maxWeeklyDD, '##.##') + '%', text_color=stop_by_dd ? color.red : color.white)
+
+    maxGuardTxt = maxGuardFires > 0 ? str.tostring(maxGuardFires) : '∞'
+    table.cell(hud, 0, 10, '청산 가드', text_color=color.white)
+    table.cell(hud, 1, 10, str.tostring(guardFiredTotal) + '/' + maxGuardTxt, text_color=stop_by_guard ? color.red : color.white)
+
+    table.cell(hud, 0, 11, '연패 상태', text_color=color.white)
+    table.cell(hud, 1, 11, str.tostring(lossStreak) + '/' + str.tostring(maxConsecutiveLosses), text_color=stop_by_streak ? color.red : color.white)
+
+    parColor = not usePerfAdaptiveRisk ? color.gray : isHotStreak ? color.new(color.orange, 20) : isColdStreak ? color.new(color.blue, 20) : color.new(color.silver, 40)
+    table.cell(hud, 0, 12, 'PAR 상태', text_color=color.white)
+    table.cell(hud, 1, 12, parStateLabel + ' / ' + parWinLabel + ' / ' + str.tostring(finalRiskPct, '#.##') + '%', text_color=color.white, bgcolor=parColor)
+
+// ─ 디버거 ──────────────────────────────────────────────────────────────────
+f_cell(tbl, c, r, txt, ok) =>
+    bg = ok ? color.new(color.green, 80) : color.new(color.red, 80)
+    table.cell(tbl, c, r, str.tostring(txt), bgcolor=bg, text_color=color.white)
+
+if showDebugger and barstate.islast
+    var table dbg = table.new(position.bottom_right, 3, 15, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
+    headerDbgBg = color.new(color.blue, 40)
+    table.cell(dbg, 0, 0, '디버거', text_color=color.white, bgcolor=headerDbgBg)
+    table.cell(dbg, 1, 0, '', bgcolor=headerDbgBg)
+    table.cell(dbg, 2, 0, '', bgcolor=headerDbgBg)
+    table.merge_cells(dbg, 0, 0, 2, 0)
+    table.cell(dbg, 0, 1, '시간 필터', text_color=color.white)
+    f_cell(dbg, 1, 1, isTimeAllowed, isTimeAllowed)
+    table.cell(dbg, 0, 2, '레짐 L/S', text_color=color.white)
+    table.cell(dbg, 1, 2, str.tostring(htfLong) + '/' + str.tostring(htfShort), text_color=color.white)
+    table.cell(dbg, 0, 3, '마이크로 트렌드', text_color=color.white)
+    table.cell(dbg, 1, 3, str.tostring(microTrendLong) + '/' + str.tostring(microTrendShort), text_color=color.white)
+    table.cell(dbg, 0, 4, 'EMA 기울기', text_color=color.white)
+    table.cell(dbg, 1, 4, str.tostring(slopePct, '#.##') + '%', text_color=slopeOK_L ? color.aqua : color.red)
+    table.cell(dbg, 0, 5, 'VWAP', text_color=color.white)
+    f_cell(dbg, 1, 5, vwapLong, vwapLong)
+    table.cell(dbg, 2, 5, vwapShort, text_color=color.white)
+    table.cell(dbg, 0, 6, '모멘텀', text_color=color.white)
+    f_cell(dbg, 1, 6, momOK_L, momOK_L)
+    f_cell(dbg, 2, 6, momOK_S, momOK_S)
+    table.cell(dbg, 0, 7, 'CHoCH', text_color=color.white)
+    f_cell(dbg, 1, 7, chochOK_L, chochOK_L)
+    f_cell(dbg, 2, 7, chochOK_S, chochOK_S)
+    table.cell(dbg, 0, 8, '볼륨/캔들', text_color=color.white)
+    f_cell(dbg, 1, 8, volumeOK, volumeOK)
+    f_cell(dbg, 2, 8, candleOK, candleOK)
+    table.cell(dbg, 0, 9, '레인지/ATR', text_color=color.white)
+    f_cell(dbg, 1, 9, rangeOK, rangeOK)
+    f_cell(dbg, 2, 9, isVolatilityOK, isVolatilityOK)
+    table.cell(dbg, 0, 10, '거래 중지', text_color=color.white)
+    f_cell(dbg, 1, 10, haltReasons, not haltReasons)
+    table.cell(dbg, 0, 11, '가드 카운터', text_color=color.white)
+    table.cell(dbg, 1, 11, str.tostring(guardFiredTotal) + '/' + str.tostring(maxGuardFires), text_color=stop_by_guard ? color.red : color.white)
+    table.cell(dbg, 0, 12, 'DD & ATR%', text_color=color.white)
+    table.cell(dbg, 1, 12, str.tostring(weeklyDD, '##.##') + '% / ' + str.tostring(atrPct, '##.##') + '%', text_color=color.white)
+    table.cell(dbg, 0, 13, '컨텍스트 OK', text_color=color.white)
+    table.cell(dbg, 1, 13, str.tostring(contextLongOK) + '/' + str.tostring(contextShortOK), text_color=color.white)
+    table.cell(dbg, 0, 14, 'PAR', text_color=color.white)
+    table.cell(dbg, 1, 14, parStateLabel, text_color=isHotStreak ? color.orange : isColdStreak ? color.new(color.blue, 0) : color.white)
+    table.cell(dbg, 2, 14, parWinLabel + ' / ' + str.tostring(finalRiskPct, '#.##') + '%', text_color=color.white)
+
+// ─ 출력 변수 (모듈 사용자용) ──────────────────────────────────────────────
+var string MODULE_VERSION = '3.0'
+var bool   MODULE_canTrade = na
+var float  MODULE_tradableCapital = na
+var float  MODULE_finalRiskPct = na
+var bool   MODULE_contextLongOK = na
+var bool   MODULE_contextShortOK = na
+
+MODULE_canTrade := canTrade
+MODULE_tradableCapital := tradableCapital
+MODULE_finalRiskPct := finalRiskPct
+MODULE_contextLongOK := contextLongOK
+MODULE_contextShortOK := contextShortOK
+
+// 유틸 함수 export용 (pine은 직접 반환 불가하지만, 전략에서 복사해 사용 권장)
+// calcPositionQty(stopDistance) 함수와 kasia_guard_price(entryPrice, direction, qty) 함수를 활용하세요.
+
