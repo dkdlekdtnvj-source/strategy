@@ -40,6 +40,7 @@ var GRP_FILTER = 'E) 모멘텀/구조 필터'
 var GRP_SL     = 'F) 손절 & 유틸'
 var GRP_HUD    = 'G) HUD & 디버거'
 var GRP_DEMO   = 'H) 데모 테스트 로직'
+var GRP_FABIO  = 'I) Fabio Valentini 스캘핑'
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ Section 1: 입력값                                                         ║
@@ -193,6 +194,37 @@ hudPosition   = input.string('Top Right', 'HUD 위치', options=['Top Left', 'To
 
 eodClose      = input.bool(true, '세션 종료 시 청산', group=GRP_HUD)
 eodTime       = input.string('02:05', '청산 시간 (HH:MM)', group=GRP_HUD)
+
+// ─ Fabio Valentini 스캘핑 ──────────────────────────────────────────────────
+useFabioLogic        = input.bool(false, 'Fabio 스캘핑 전략 실행', group=GRP_FABIO)
+fabioEnableLong      = input.bool(true, '롱', inline='fabDir', group=GRP_FABIO)
+fabioEnableShort     = input.bool(true, '숏', inline='fabDir', group=GRP_FABIO)
+fabioContextTf       = input.string('15', '상위 추세 타임프레임', options=['60', '30', '15'], group=GRP_FABIO)
+fabioContextEmaLen   = input.int(55, '상위 EMA 길이', minval=5, maxval=200, group=GRP_FABIO)
+fabioStructureTf     = input.string('5', '구조 확인 타임프레임', options=['5', '3'], group=GRP_FABIO)
+fabioStructureLookback = input.int(36, '구조 범위 탐색 봉 수', minval=5, maxval=300, group=GRP_FABIO)
+fabioStructureEmaLen = input.int(21, '구조 EMA 길이', minval=3, maxval=150, group=GRP_FABIO)
+fabioRequireBreakout = input.bool(true, '5분 돌파 확인', group=GRP_FABIO)
+fabioVwapTolerance   = input.float(0.45, 'VWAP 되돌림 허용 %', minval=0.05, maxval=5.0, step=0.05, group=GRP_FABIO)
+fabioVolumeLookback  = input.int(20, '1분 거래량 평균 길이', minval=5, maxval=200, group=GRP_FABIO)
+fabioVolumeSpikeMult = input.float(1.6, '1분 거래량 배수', minval=1.0, maxval=6.0, step=0.05, group=GRP_FABIO)
+fabioUseRetest       = input.bool(true, '돌파 후 1분 재진입 확인', group=GRP_FABIO)
+fabioRetestBars      = input.int(5, '재진입 탐색 바 수 (1분)', minval=0, maxval=30, group=GRP_FABIO)
+fabioRetestTolerance = input.float(0.35, '재진입 허용 오차 %', minval=0.0, maxval=5.0, step=0.05, group=GRP_FABIO)
+fabioCvdAnchor       = input.string('Session', 'CVD 리셋 주기', options=['Session', 'D', 'W'], group=GRP_FABIO)
+fabioCvdSession      = input.session('0930-1600', 'CVD 세션 (로컬)', group=GRP_FABIO)
+fabioCvdSlopeLen     = input.int(5, 'CVD 기울기 EMA 길이', minval=1, maxval=100, group=GRP_FABIO)
+fabioCvdThreshold    = input.float(0.0, 'CVD 임계값', step=0.1, group=GRP_FABIO)
+fabioUseDynamicCvd   = input.bool(true, 'CVD 임계 동적 조정', group=GRP_FABIO)
+fabioCvdVolLen       = input.int(21, 'CVD 변동성 EMA 길이', minval=1, maxval=200, group=GRP_FABIO)
+fabioCvdVolMult      = input.float(1.2, 'CVD 변동성 배수', minval=0.1, maxval=5.0, step=0.05, group=GRP_FABIO)
+fabioAtrMult         = input.float(1.2, 'ATR 손절 배수', minval=0.3, maxval=6.0, step=0.05, group=GRP_FABIO)
+fabioRiskReward      = input.float(2.0, '목표 손익비', minval=0.5, maxval=6.0, step=0.05, group=GRP_FABIO)
+fabioUseBreakEven    = input.bool(true, '손익비 달성 시 BE 이동', group=GRP_FABIO)
+fabioBreakEvenMult   = input.float(1.0, 'BE 이동 배수', minval=0.5, maxval=4.0, step=0.05, group=GRP_FABIO)
+fabioUseTrailStop    = input.bool(false, 'ATR 트레일링 사용', group=GRP_FABIO)
+fabioTrailAfterBe    = input.bool(true, 'BE 충족 후 트레일링 시작', group=GRP_FABIO)
+fabioTrailAtrMult    = input.float(0.7, '트레일링 ATR 배수', minval=0.1, maxval=4.0, step=0.05, group=GRP_FABIO)
 
 // ─ 데모 테스트 로직 ───────────────────────────────────────────────────────
 useDemoLogic = input.bool(false, '데모 RSI 진입 로직 실행', group=GRP_DEMO)
@@ -475,6 +507,246 @@ isTimeAllowed = isBacktestWindow and sessionAllowed and kstAllowed and isDayAllo
 haltReasons = isCapitalBreached or isGuardHalted or stop_by_losses or stop_by_dd or stop_by_guard or stop_by_capital or stop_by_streak or stop_by_perf or stop_by_profit
 canTrade     = isTimeAllowed and not haltReasons and isVolatilityOK
 
+// ─ Fabio Valentini 스캘핑 계산 ──────────────────────────────────────────────
+fabioHtfCloseSeries = request.security(syminfo.tickerid, fabioContextTf, close, lookahead=barmerge.lookahead_off)
+fabioHtfEmaSeries   = request.security(syminfo.tickerid, fabioContextTf, ta.ema(close, fabioContextEmaLen), lookahead=barmerge.lookahead_off)
+fabioStructCloseSeries = request.security(syminfo.tickerid, fabioStructureTf, close, lookahead=barmerge.lookahead_off)
+fabioStructVwapSeries  = request.security(syminfo.tickerid, fabioStructureTf, ta.vwap, lookahead=barmerge.lookahead_off)
+fabioStructEmaSeries   = request.security(syminfo.tickerid, fabioStructureTf, ta.ema(close, fabioStructureEmaLen), lookahead=barmerge.lookahead_off)
+fabioRangeHighSeries   = request.security(syminfo.tickerid, fabioStructureTf, ta.highest(high, fabioStructureLookback), lookahead=barmerge.lookahead_off)
+fabioRangeLowSeries    = request.security(syminfo.tickerid, fabioStructureTf, ta.lowest(low, fabioStructureLookback), lookahead=barmerge.lookahead_off)
+
+fabioHtfClose = fabioHtfCloseSeries[1]
+fabioHtfEma   = fabioHtfEmaSeries[1]
+fabioStructClose = fabioStructCloseSeries[1]
+fabioStructVwap  = fabioStructVwapSeries[1]
+fabioStructTrend = fabioStructEmaSeries[1]
+fabioRangeHigh   = fabioRangeHighSeries[1]
+fabioRangeLow    = fabioRangeLowSeries[1]
+fabioRangeHighPrev = fabioRangeHighSeries[2]
+fabioRangeLowPrev  = fabioRangeLowSeries[2]
+fabioRangeMid    = not na(fabioRangeHigh) and not na(fabioRangeLow) ? (fabioRangeHigh + fabioRangeLow) / 2.0 : na
+
+fabioBreakoutUp   = not fabioRequireBreakout or (not na(fabioStructClose) and not na(fabioRangeHighPrev) and fabioStructClose > fabioRangeHighPrev)
+fabioBreakoutDown = not fabioRequireBreakout or (not na(fabioStructClose) and not na(fabioRangeLowPrev) and fabioStructClose < fabioRangeLowPrev)
+fabioStructMomentumLong  = not na(fabioStructClose) and not na(fabioStructTrend) and fabioStructClose >= fabioStructTrend
+fabioStructMomentumShort = not na(fabioStructClose) and not na(fabioStructTrend) and fabioStructClose <= fabioStructTrend
+fabioStructLongOK  = fabioStructMomentumLong and fabioBreakoutUp and (na(fabioStructVwap) or fabioStructClose >= fabioStructVwap)
+fabioStructShortOK = fabioStructMomentumShort and fabioBreakoutDown and (na(fabioStructVwap) or fabioStructClose <= fabioStructVwap)
+
+fabioHtfLong  = not na(fabioHtfClose) and not na(fabioHtfEma) and fabioHtfClose >= fabioHtfEma
+fabioHtfShort = not na(fabioHtfClose) and not na(fabioHtfEma) and fabioHtfClose <= fabioHtfEma
+
+fabioVolAvg      = ta.sma(volume, fabioVolumeLookback)
+fabioVolumeSpike = fabioVolAvg > 0 ? volume >= fabioVolAvg * fabioVolumeSpikeMult : false
+
+fabioAnchorRes = fabioCvdAnchor == 'W' ? 'W' : 'D'
+fabioSessionTime = time(timeframe.period, fabioCvdSession)
+fabioSessionReset = fabioCvdAnchor == 'Session' and not na(fabioSessionTime) and (na(fabioSessionTime[1]) or fabioSessionTime != fabioSessionTime[1])
+fabioCalendarReset = false
+if fabioCvdAnchor != 'Session'
+    fabioCalendarReset := ta.change(time(fabioAnchorRes)) != 0
+fabioReset     = fabioCvdAnchor == 'Session' ? fabioSessionReset : fabioCalendarReset
+fabioToggleOn  = useFabioLogic and not nz(useFabioLogic[1], false)
+fabioDeltaDir  = close > close[1] ? 1.0 : close < close[1] ? -1.0 : 0.0
+fabioDeltaVol  = volume * fabioDeltaDir
+var float fabioCvd = 0.0
+if useFabioLogic
+    if fabioReset or fabioToggleOn
+        fabioCvd := fabioDeltaVol
+    else
+        fabioCvd := nz(fabioCvd[1]) + fabioDeltaVol
+else
+    fabioCvd := 0.0
+fabioCvdEma       = useFabioLogic ? ta.ema(fabioCvd, fabioCvdSlopeLen) : na
+fabioCvdImpulse   = useFabioLogic ? fabioCvd - fabioCvdEma : na
+fabioCvdVolBase   = useFabioLogic ? ta.ema(math.abs(fabioCvdImpulse), fabioCvdVolLen) : na
+fabioCvdThFinal   = useFabioLogic ? (fabioUseDynamicCvd ? nz(fabioCvdVolBase) * fabioCvdVolMult + fabioCvdThreshold : fabioCvdThreshold) : na
+fabioFlowLong     = useFabioLogic and not na(fabioCvdImpulse) and not na(fabioCvdThFinal) and fabioCvdImpulse >= fabioCvdThFinal
+fabioFlowShort    = useFabioLogic and not na(fabioCvdImpulse) and not na(fabioCvdThFinal) and fabioCvdImpulse <= -fabioCvdThFinal
+
+fabioVwap1m       = vwap
+fabioPullbackPct  = not na(fabioStructVwap) and close > 0 ? math.abs(close - fabioStructVwap) / close * 100.0 : na
+fabioVwapAlignLong  = useFabioLogic and not na(fabioPullbackPct) and fabioPullbackPct <= fabioVwapTolerance and close >= fabioVwap1m and (na(fabioStructVwap) or close >= fabioStructVwap)
+fabioVwapAlignShort = useFabioLogic and not na(fabioPullbackPct) and fabioPullbackPct <= fabioVwapTolerance and close <= fabioVwap1m and (na(fabioStructVwap) or close <= fabioStructVwap)
+
+var float fabioRetestLongTracker = na
+var int   fabioRetestLongCounter = 0
+var bool  fabioRetestLongReady   = false
+var float fabioRetestShortTracker = na
+var int   fabioRetestShortCounter = 0
+var bool  fabioRetestShortReady   = false
+
+if not useFabioLogic
+    fabioRetestLongTracker := na
+    fabioRetestLongCounter := 0
+    fabioRetestLongReady   := fabioUseRetest ? false : true
+    fabioRetestShortTracker := na
+    fabioRetestShortCounter := 0
+    fabioRetestShortReady   := fabioUseRetest ? false : true
+else
+    breakoutUpNow   = fabioBreakoutUp
+    breakoutUpPrev  = nz(fabioBreakoutUp[1], false)
+    breakoutDownNow  = fabioBreakoutDown
+    breakoutDownPrev = nz(fabioBreakoutDown[1], false)
+
+    if fabioUseRetest
+        if fabioToggleOn
+            fabioRetestLongTracker := na
+            fabioRetestLongCounter := 0
+            fabioRetestLongReady   := false
+            fabioRetestShortTracker := na
+            fabioRetestShortCounter := 0
+            fabioRetestShortReady   := false
+        if breakoutUpNow and not breakoutUpPrev
+            fabioRetestLongTracker := low
+            fabioRetestLongCounter := 0
+            fabioRetestLongReady   := false
+            if fabioRetestBars == 0 and not na(fabioRangeHighPrev) and fabioRangeHighPrev > 0
+                distPctLong = math.abs(fabioRetestLongTracker - fabioRangeHighPrev) / fabioRangeHighPrev * 100.0
+                if distPctLong <= fabioRetestTolerance
+                    fabioRetestLongReady := true
+        else if breakoutUpNow
+            fabioRetestLongCounter += 1
+            fabioRetestLongTracker := math.min(nz(fabioRetestLongTracker, low), low)
+            if not fabioRetestLongReady and not na(fabioRangeHighPrev) and fabioRangeHighPrev > 0
+                distPctLong = math.abs(fabioRetestLongTracker - fabioRangeHighPrev) / fabioRangeHighPrev * 100.0
+                if distPctLong <= fabioRetestTolerance
+                    fabioRetestLongReady := true
+            if fabioRetestLongCounter > fabioRetestBars and not fabioRetestLongReady
+                fabioRetestLongTracker := na
+        else
+            fabioRetestLongTracker := na
+            fabioRetestLongCounter := 0
+            fabioRetestLongReady   := false
+
+        if breakoutDownNow and not breakoutDownPrev
+            fabioRetestShortTracker := high
+            fabioRetestShortCounter := 0
+            fabioRetestShortReady   := false
+            if fabioRetestBars == 0 and not na(fabioRangeLowPrev) and fabioRangeLowPrev > 0
+                distPctShort = math.abs(fabioRetestShortTracker - fabioRangeLowPrev) / fabioRangeLowPrev * 100.0
+                if distPctShort <= fabioRetestTolerance
+                    fabioRetestShortReady := true
+        else if breakoutDownNow
+            fabioRetestShortCounter += 1
+            fabioRetestShortTracker := math.max(nz(fabioRetestShortTracker, high), high)
+            if not fabioRetestShortReady and not na(fabioRangeLowPrev) and fabioRangeLowPrev > 0
+                distPctShort = math.abs(fabioRetestShortTracker - fabioRangeLowPrev) / fabioRangeLowPrev * 100.0
+                if distPctShort <= fabioRetestTolerance
+                    fabioRetestShortReady := true
+            if fabioRetestShortCounter > fabioRetestBars and not fabioRetestShortReady
+                fabioRetestShortTracker := na
+        else
+            fabioRetestShortTracker := na
+            fabioRetestShortCounter := 0
+            fabioRetestShortReady   := false
+    else
+        fabioRetestLongReady  := true
+        fabioRetestShortReady := true
+
+var bool fabioLongSignal = false
+var bool fabioShortSignal = false
+fabioLongSignal := false
+fabioShortSignal := false
+
+var float fabioLongStopCache   = na
+var float fabioLongTargetCache = na
+var bool  fabioLongBeTriggered = false
+var float fabioShortStopCache   = na
+var float fabioShortTargetCache = na
+var bool  fabioShortBeTriggered = false
+
+if useFabioLogic and strategy.position_size == 0
+    fabioLongStopCache   := na
+    fabioLongTargetCache := na
+    fabioShortStopCache   := na
+    fabioShortTargetCache := na
+    fabioLongBeTriggered  := false
+    fabioShortBeTriggered := false
+
+if useFabioLogic and barstate.isconfirmed and strategy.position_size == 0 and canTrade
+    fabioLongBias  = fabioEnableLong and contextLongOK and fabioHtfLong and fabioStructLongOK and fabioVwapAlignLong and fabioVolumeSpike and fabioFlowLong and fabioRetestLongReady
+    fabioShortBias = fabioEnableShort and contextShortOK and fabioHtfShort and fabioStructShortOK and fabioVwapAlignShort and fabioVolumeSpike and fabioFlowShort and fabioRetestShortReady
+
+    if fabioLongBias
+        stopLevel = close - atrStop * fabioAtrMult
+        if usePivotSL and not na(pivLowCache)
+            stopLevel := math.min(stopLevel, pivLowCache)
+        stopDist = close - stopLevel
+        qtyFabio = calcPositionQty(stopDist + slipBuffer)
+        if qtyFabio > 0 and stopDist > 0
+            strategy.entry('Fabio Long', strategy.long, qty=qtyFabio)
+            fabioLongStopCache   := stopLevel
+            fabioLongTargetCache := close + stopDist * fabioRiskReward
+            fabioLongBeTriggered := false
+            fabioLongSignal      := true
+            if fabioUseRetest
+                fabioRetestLongReady   := false
+                fabioRetestLongTracker := na
+                fabioRetestLongCounter := 0
+    if fabioShortBias and not fabioLongSignal
+        stopLevel = close + atrStop * fabioAtrMult
+        if usePivotSL and not na(pivHighCache)
+            stopLevel := math.max(stopLevel, pivHighCache)
+        stopDist = stopLevel - close
+        qtyFabio = calcPositionQty(stopDist + slipBuffer)
+        if qtyFabio > 0 and stopDist > 0
+            strategy.entry('Fabio Short', strategy.short, qty=qtyFabio)
+            fabioShortStopCache   := stopLevel
+            fabioShortTargetCache := close - stopDist * fabioRiskReward
+            fabioShortBeTriggered := false
+            fabioShortSignal      := true
+            if fabioUseRetest
+                fabioRetestShortReady   := false
+                fabioRetestShortTracker := na
+                fabioRetestShortCounter := 0
+
+if useFabioLogic
+    longStop = na
+    longTarget = na
+    shortStop = na
+    shortTarget = na
+
+    if not na(fabioLongStopCache) and not na(fabioLongTargetCache)
+        longStop := fabioLongStopCache
+        longTarget := fabioLongTargetCache
+        if strategy.position_size > 0 and fabioUseBreakEven and not fabioLongBeTriggered
+            riskSize = strategy.position_avg_price - fabioLongStopCache
+            profit   = close - strategy.position_avg_price
+            if riskSize > 0 and profit >= riskSize * fabioBreakEvenMult
+                fabioLongStopCache := math.max(fabioLongStopCache, strategy.position_avg_price)
+                fabioLongBeTriggered := true
+                longStop := fabioLongStopCache
+        if strategy.position_size > 0 and fabioUseTrailStop and not na(atrStop)
+            canTrailLong = not fabioTrailAfterBe or not fabioUseBreakEven or fabioLongBeTriggered
+            if canTrailLong
+                trailLevel = close - atrStop * fabioTrailAtrMult
+                fabioLongStopCache := math.max(fabioLongStopCache, trailLevel)
+                longStop := fabioLongStopCache
+    if not na(fabioShortStopCache) and not na(fabioShortTargetCache)
+        shortStop := fabioShortStopCache
+        shortTarget := fabioShortTargetCache
+        if strategy.position_size < 0 and fabioUseBreakEven and not fabioShortBeTriggered
+            riskSize = fabioShortStopCache - strategy.position_avg_price
+            profit   = strategy.position_avg_price - close
+            if riskSize > 0 and profit >= riskSize * fabioBreakEvenMult
+                fabioShortStopCache := math.min(fabioShortStopCache, strategy.position_avg_price)
+                fabioShortBeTriggered := true
+                shortStop := fabioShortStopCache
+        if strategy.position_size < 0 and fabioUseTrailStop and not na(atrStop)
+            canTrailShort = not fabioTrailAfterBe or not fabioUseBreakEven or fabioShortBeTriggered
+            if canTrailShort
+                trailLevel = close + atrStop * fabioTrailAtrMult
+                fabioShortStopCache := math.min(fabioShortStopCache, trailLevel)
+                shortStop := fabioShortStopCache
+
+    strategy.exit('Fabio Long Exit', from_entry='Fabio Long', stop=longStop, limit=longTarget)
+    strategy.exit('Fabio Short Exit', from_entry='Fabio Short', stop=shortStop, limit=shortTarget)
+else
+    strategy.exit('Fabio Long Exit', from_entry='Fabio Long', stop=na, limit=na)
+    strategy.exit('Fabio Short Exit', from_entry='Fabio Short', stop=na, limit=na)
+
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ Section 3: 데모 전략 (옵션)                                              ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
@@ -516,6 +788,12 @@ plot(useMicroTrend ? emaSlow : na, 'EMA 느린선', color=color.new(color.orange
 plot(usePivotSL ? pivLowCache : na, 'Pivot SL Long', color=color.new(color.red, 0), style=plot.style_linebr)
 plot(usePivotSL ? pivHighCache : na, 'Pivot SL Short', color=color.new(color.red, 0), style=plot.style_linebr)
 plot(useVWAPFilter ? vwap : na, 'VWAP', color=color.new(color.yellow, 40))
+plot(useFabioLogic ? fabioStructVwap : na, 'Fabio 5분 VWAP', color=color.new(color.yellow, 0), linewidth=2)
+plot(useFabioLogic ? fabioRangeHigh : na, 'Fabio 5분 Range High', color=color.new(color.lime, 60), style=plot.style_linebr)
+plot(useFabioLogic ? fabioRangeLow : na, 'Fabio 5분 Range Low', color=color.new(color.fuchsia, 60), style=plot.style_linebr)
+plot(useFabioLogic ? fabioRangeMid : na, 'Fabio 5분 균형값', color=color.new(color.blue, 75), style=plot.style_line)
+plot(useFabioLogic ? fabioCvd : na, 'Fabio 세션 CVD', color=color.new(color.purple, 0), display=display.none)
+plot(useFabioLogic ? fabioCvdThFinal : na, 'Fabio CVD Threshold', color=color.new(color.orange, 0), display=display.none)
 
 // ─ HUD ─────────────────────────────────────────────────────────────────────
 if showHUD and barstate.islast
@@ -588,7 +866,7 @@ f_cell(tbl, c, r, txt, ok) =>
     table.cell(tbl, c, r, str.tostring(txt), bgcolor=bg, text_color=color.white)
 
 if showDebugger and barstate.islast
-    var table dbg = table.new(position.bottom_right, 3, 15, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
+    var table dbg = table.new(position.bottom_right, 3, 17, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
     headerDbgBg = color.new(color.blue, 40)
     table.cell(dbg, 0, 0, '디버거', text_color=color.white, bgcolor=headerDbgBg)
     table.cell(dbg, 1, 0, '', bgcolor=headerDbgBg)
@@ -628,6 +906,12 @@ if showDebugger and barstate.islast
     table.cell(dbg, 0, 14, 'PAR', text_color=color.white)
     table.cell(dbg, 1, 14, parStateLabel, text_color=isHotStreak ? color.orange : isColdStreak ? color.new(color.blue, 0) : color.white)
     table.cell(dbg, 2, 14, parWinLabel + ' / ' + str.tostring(finalRiskPct, '#.##') + '%', text_color=color.white)
+    table.cell(dbg, 0, 15, 'Fabio Flow', text_color=color.white)
+    table.cell(dbg, 1, 15, str.tostring(fabioFlowLong), text_color=fabioFlowLong ? color.lime : color.white)
+    table.cell(dbg, 2, 15, str.tostring(fabioFlowShort), text_color=fabioFlowShort ? color.red : color.white)
+    table.cell(dbg, 0, 16, 'Fabio Retest', text_color=color.white)
+    table.cell(dbg, 1, 16, str.tostring(fabioRetestLongReady), text_color=fabioRetestLongReady ? color.lime : color.white)
+    table.cell(dbg, 2, 16, str.tostring(fabioRetestShortReady), text_color=fabioRetestShortReady ? color.red : color.white)
 
 // ─ 출력 변수 (모듈 사용자용) ──────────────────────────────────────────────
 var string MODULE_VERSION = '3.0'
