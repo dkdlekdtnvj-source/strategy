@@ -584,16 +584,19 @@ method stdev(float src, simple int len) =>
         sum += (val - sq) * (val - psq)
     math.sqrt(sum / (len - 1))
 method osc(bar b, simple int sig, simple int len) =>
-    float av = ta.sma(b.src('hl2'), len)
-    bar   z  = bar.new(b.o, ta.highest(b.h, len), ta.lowest(b.l, len), b.c, b.i)
-    float x  = ta.linreg((z.c - math.avg(z.src('hl2'), av)) / z.atr() * 100, len, 0)
-    osc.new(x, ta.sma(x, sig))
+    float bbBasis = ta.sma(close, sqz_bbLen)
+    float highestHigh = ta.highest(high, sqz_kcLen)
+    float lowestLow   = ta.lowest(low, sqz_kcLen)
+    float mean        = (highestHigh + lowestLow) / 2.0
+    float avg_line    = (bbBasis + mean) / 2.0
+    float atr_primary = ta.atr(len)
+    float norm        = atr_primary > 0 ? (close - avg_line) / atr_primary * 100.0 : 0.0
+    float momentum    = ta.linreg(norm, len, 0)
+    osc.new(momentum, ta.sma(momentum, sig))
 method dfo(bar b, simple int len) =>
-    float tr = b.atr(len)
-    float up = ta.rma(math.max(ta.change(b.h), 0), len) / tr
-    float dn = ta.rma(math.max(ta.change(b.l) * -1, 0), len) / tr
-    float x  = ta.rma((up - dn) / (up + dn), len / 2) * 100
-    osc.new(x, x > +25 ? (x - 25) : x < -25 ? (x + 25) : na)
+    [plus_di, minus_di, _] = ta.dmi(len, len)
+    float fluxRaw = plus_di - minus_di
+    osc.new(fluxRaw, fluxRaw > +25 ? (fluxRaw - 25) : fluxRaw < -25 ? (fluxRaw + 25) : na)
 method sqz(bar b, simple int bbLen, simple int kcLen, simple float bbMult, simple float kcMult) =>
     array<bool> sqzArr = array.new_bool()
     float dev  = b.c.stdev(bbLen) * bbMult
