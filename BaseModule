@@ -57,15 +57,6 @@ primarySession   = input.session('0830-0200', '기본 세션 (거래소 로컬)'
 useKstSession = input.bool(true, '한국시간 세션 필터', group=GRP_TIME)
 kstSession   = input.session('0930-0200', '한국시간 세션', group=GRP_TIME)
 
-useDayFilter = input.bool(true, '요일 필터 사용', group=GRP_TIME)
-monOk = input.bool(true,  '월', inline='dow1', group=GRP_TIME)
-tueOk = input.bool(true,  '화', inline='dow1', group=GRP_TIME)
-wedOk = input.bool(true,  '수', inline='dow1', group=GRP_TIME)
-thuOk = input.bool(true,  '목', inline='dow1', group=GRP_TIME)
-friOk = input.bool(true,  '금', inline='dow2', group=GRP_TIME)
-satOk = input.bool(false, '토', inline='dow2', group=GRP_TIME)
-sunOk = input.bool(false, '일', inline='dow2', group=GRP_TIME)
-
 // ─ 리스크 & 월렛 ────────────────────────────────────────────────────────────
 positionSizingMode = input.string('Risk-Based', '사이징 엔진', options=['Risk-Based', 'Notional'], group=GRP_RISK, tooltip='Risk-Based: 손절 거리 기반 R 관리 / Notional: 고정 달러 또는 자산 %')
 riskSizingType     = input.string('Fixed Fractional', '리스크 포지션 타입', options=['Fixed Fractional', 'Fixed Lot'], group=GRP_RISK)
@@ -156,21 +147,10 @@ useConfBias      = input.bool(true, '확인 EMA 필터', group=GRP_CTX)
 confLenBase      = input.int(55, '확인 EMA 기본', minval=10, maxval=300, group=GRP_CTX)
 
 // ─ 모멘텀/구조 필터 ───────────────────────────────────────────────────────
-useMomConfirm   = input.bool(true, '모멘텀 확증 사용', group=GRP_FILTER)
-bbLen           = input.int(18, '볼린저 길이', minval=10, maxval=100, group=GRP_FILTER)
-bbMult          = input.float(1.2, '볼린저 배수', minval=0.5, maxval=5, step=0.1, group=GRP_FILTER)
-kcLen           = input.int(21, '켈트너 길이', minval=10, maxval=100, group=GRP_FILTER)
-
-useCHoCH        = input.bool(true, 'CHoCH 확인 사용', group=GRP_FILTER)
-pL              = input.int(2, '피벗 좌', minval=1, maxval=20, group=GRP_FILTER)
-pR              = input.int(3, '피벗 우', minval=1, maxval=20, group=GRP_FILTER)
 
 useVolumeFilter = input.bool(true, '거래량 스파이크 필터', group=GRP_FILTER)
 volumeLookback  = input.int(34, '거래량 평균 기간', minval=5, maxval=200, group=GRP_FILTER)
 volumeMultiplier = input.float(1.3, '거래량 배수', minval=1.0, maxval=5.0, step=0.1, group=GRP_FILTER)
-
-useCandleFilter = input.bool(true, '캔들 모멘텀 필터', group=GRP_FILTER)
-candleBodyRatio = input.float(55, '몸통 비율 %', minval=10, maxval=99, step=1, group=GRP_FILTER)
 
 useRSIShift     = input.bool(true, '상위봉 RSI 바이어스', group=GRP_FILTER)
 rsiBullBand     = input.float(52, 'RSI 강세 기준', minval=40, maxval=70, step=0.5, group=GRP_FILTER)
@@ -178,13 +158,6 @@ rsiBearBand     = input.float(48, 'RSI 약세 기준', minval=30, maxval=60, ste
 
 useEquitySlopeFilter = input.bool(true, '순자산 기울기 필터', group=GRP_FILTER)
 eqSlopeLen      = input.int(120, '순자산 기울기 길이', minval=20, maxval=500, group=GRP_FILTER)
-
-// ─ 손절 & 유틸 ────────────────────────────────────────────────────────────
-usePivotSL    = input.bool(true, '피벗 손절 사용', group=GRP_SL)
-pivLeft       = input.int(4, '피벗 좌', minval=1, maxval=20, group=GRP_SL)
-pivRight      = input.int(4, '피벗 우', minval=1, maxval=20, group=GRP_SL)
-atrLenSL      = input.int(14, 'ATR 손절 길이', minval=5, maxval=100, group=GRP_SL)
-atrBufferMult = input.float(0.25, 'ATR 버퍼 배수', minval=0, maxval=2, step=0.05, group=GRP_SL)
 
 // ─ HUD & 디버거 ────────────────────────────────────────────────────────────
 showHUD       = input.bool(true, 'HUD 표시', group=GRP_HUD)
@@ -206,27 +179,6 @@ rsiLenDemo   = input.int(14, '데모 RSI 길이', group=GRP_DEMO, minval=1)
 isBacktestWindow = time >= startTs
 sessionAllowed   = not useSessionFilter or not na(time(timeframe.period, primarySession))
 kstAllowed       = not useKstSession or not na(time(timeframe.period, kstSession, 'Asia/Seoul'))
-
-getDayChar() =>
-    dayofweek == dayofweek.monday    ? '월' :
-    dayofweek == dayofweek.tuesday   ? '화' :
-    dayofweek == dayofweek.wednesday ? '수' :
-    dayofweek == dayofweek.thursday  ? '목' :
-    dayofweek == dayofweek.friday    ? '금' :
-    dayofweek == dayofweek.saturday  ? '토' : '일'
-
-dayChar = getDayChar()
-
-isDayEnabled(d) =>
-    (d == '월' and monOk) or
-    (d == '화' and tueOk) or
-    (d == '수' and wedOk) or
-    (d == '목' and thuOk) or
-    (d == '금' and friOk) or
-    (d == '토' and satOk) or
-    (d == '일' and sunOk)
-
-isDayAllowed = not useDayFilter or isDayEnabled(dayChar)
 
 // ─ 월렛 & 자본 추적 ────────────────────────────────────────────────────────
 var float tradableCapital = strategy.initial_capital
@@ -394,62 +346,6 @@ vwap = ta.vwap
 vwapLong  = not useVWAPFilter or close >= vwap
 vwapShort = not useVWAPFilter or close <= vwap
 
-atrDistance = ta.atr(distanceAtrLen)
-vwDistance  = atrDistance > 0 ? math.abs(close - vwap) / atrDistance : 0.0
-trendDistance = atrDistance > 0 ? math.abs(close - maTrend) / atrDistance : 0.0
-
-distanceOK_L = not useDistanceGuard or (vwDistance <= distanceMaxAtr and trendDistance <= distanceMaxAtr)
-distanceOK_S = distanceOK_L
-
-bbBasis = ta.sma(close, bbLen)
-bbDev   = bbMult * ta.stdev(close, bbLen)
-bbUpper = bbBasis + bbDev
-bbLower = bbBasis - bbDev
-kcRange = ta.atr(kcLen) * bbMult
-squeezeOn = (bbUpper - bbLower) < kcRange
-mom = ta.linreg(close - bbBasis, 14, 0)
-momOK_L = not useMomConfirm or (mom > 0 and (not squeezeOn or ta.crossover(mom, 0)))
-momOK_S = not useMomConfirm or (mom < 0 and (not squeezeOn or ta.crossunder(mom, 0)))
-
-ph = ta.pivothigh(high, pL, pR)
-pl = ta.pivotlow(low, pL, pR)
-lastHigh = ta.valuewhen(not na(ph), ph, 0)
-lastLow  = ta.valuewhen(not na(pl), pl, 0)
-bullCHoCH = not na(lastHigh) and not na(lastLow) and close > lastHigh and low > lastLow
-bearCHoCH = not na(lastHigh) and not na(lastLow) and close < lastLow and high < lastHigh
-chochOK_L = not useCHoCH or bullCHoCH
-chochOK_S = not useCHoCH or bearCHoCH
-
-avgVolume      = ta.sma(volume, volumeLookback)
-isVolumeSpike  = avgVolume > 0 ? volume >= avgVolume * volumeMultiplier : false
-volumeOK       = not useVolumeFilter or isVolumeSpike
-
-bodySize = math.abs(close - open)
-fullSize = high - low
-isMomentumCandle = fullSize > 0 and bodySize / fullSize * 100 >= candleBodyRatio
-candleOK        = not useCandleFilter or isMomentumCandle
-
-rsiShiftOK_L = not useRSIShift or htfRsi >= rsiBullBand
-rsiShiftOK_S = not useRSIShift or htfRsi <= rsiBearBand
-
-eqSlope = ta.linreg(strategy.equity, eqSlopeLen, 0) - ta.linreg(strategy.equity, eqSlopeLen, 1)
-equitySlopeOK_L = not useEquitySlopeFilter or eqSlope >= 0
-equitySlopeOK_S = not useEquitySlopeFilter or eqSlope <= 0
-
-contextLongOK = microTrendLong and trendBiasLongOK and confBiasLongOK and slopeOK_L and rangeOK and vwapLong and distanceOK_L and momOK_L and chochOK_L and volumeOK and candleOK and rsiShiftOK_L and htfLong and equitySlopeOK_L
-contextShortOK = microTrendShort and trendBiasShortOK and confBiasShortOK and slopeOK_S and rangeOK and vwapShort and distanceOK_S and momOK_S and chochOK_S and volumeOK and candleOK and rsiShiftOK_S and htfShort and equitySlopeOK_S
-
-// ─ 손절 보조 ──────────────────────────────────────────────────────────────
-var float pivLowCache  = na
-var float pivHighCache = na
-if usePivotSL
-    lastPivotLow  = ta.valuewhen(not na(ta.pivotlow(low, pivLeft, pivRight)), ta.pivotlow(low, pivLeft, pivRight), 0)
-    lastPivotHigh = ta.valuewhen(not na(ta.pivothigh(high, pivLeft, pivRight)), ta.pivothigh(high, pivLeft, pivRight), 0)
-    if not na(lastPivotLow)
-        pivLowCache := lastPivotLow - atrBufferMult * atrStop
-    if not na(lastPivotHigh)
-        pivHighCache := lastPivotHigh + atrBufferMult * atrStop
-
 // ─ 수량 계산 헬퍼 ──────────────────────────────────────────────────────────
 calcNotionalQty() =>
     baseEquity = tradableCapital
@@ -471,34 +367,10 @@ calcPositionQty(stopDistance) =>
     na(qtySelected) ? 0.0 : math.max(qtySelected, 0.0)
 
 // ─ 거래 허용 여부 ─────────────────────────────────────────────────────────
-isTimeAllowed = isBacktestWindow and sessionAllowed and kstAllowed and isDayAllowed
-haltReasons = isCapitalBreached or isGuardHalted or stop_by_losses or stop_by_dd or stop_by_guard or stop_by_capital or stop_by_streak or stop_by_perf or stop_by_profit
-canTrade     = isTimeAllowed and not haltReasons and isVolatilityOK
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ Section 3: 데모 전략 (옵션)                                              ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
-
-if useDemoLogic
-    demoRsi = ta.rsi(close, rsiLenDemo)
-    longCond  = ta.crossover(demoRsi, 30)
-    shortCond = ta.crossunder(demoRsi, 70)
-
-    if strategy.position_size == 0 and canTrade
-        if longCond and contextLongOK
-            stopLevel = usePivotSL and not na(pivLowCache) ? math.min(close - atrStop, pivLowCache) : close - atrStop
-            stopDist  = close - stopLevel
-            qty       = calcPositionQty(stopDist + slipBuffer)
-            if qty > 0
-                strategy.entry('Demo Long', strategy.long, qty=qty)
-                strategy.exit('Demo Long SL', from_entry='Demo Long', stop=stopLevel)
-        if shortCond and contextShortOK
-            stopLevel = usePivotSL and not na(pivHighCache) ? math.max(close + atrStop, pivHighCache) : close + atrStop
-            stopDist  = stopLevel - close
-            qty       = calcPositionQty(stopDist + slipBuffer)
-            if qty > 0
-                strategy.entry('Demo Short', strategy.short, qty=qty)
-                strategy.exit('Demo Short SL', from_entry='Demo Short', stop=stopLevel)
 
 // EOD 강제 청산
 if eodClose and strategy.position_size != 0
