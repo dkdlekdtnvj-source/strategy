@@ -265,7 +265,7 @@ if barstate.isconfirmed
 currentDD      = peakEquity > 0 ? (peakEquity - strategy.equity) / peakEquity * 100 : 0.0
 scaledRiskPct  = useDrawdownScaling and currentDD > drawdownTriggerPct ? baseRiskPct * drawdownRiskScale : baseRiskPct
 
-var float recentTradeResults[] = array.new_float()
+var float[] recentTradeResults = array.new_float()
 var int lastClosedCount = 0
 closedCount = strategy.closedtrades
 if usePerfAdaptiveRisk and closedCount > lastClosedCount
