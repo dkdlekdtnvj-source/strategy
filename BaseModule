@@ -40,6 +40,22 @@ var GRP_FILTER = 'E) 모멘텀/구조 필터'
 var GRP_SL     = 'F) 손절 & 유틸'
 var GRP_HUD    = 'G) HUD & 디버거'
 var GRP_DEMO   = 'H) 데모 테스트 로직'
+var GRP_MAGIC_OSC  = 'I) 매직1분VN - 모멘텀'
+var GRP_MAGIC_FLUX = 'I) 매직1분VN - 방향성'
+var GRP_MAGIC_EXIT = 'I) 매직1분VN - 청산'
+var GRP_MAGIC_FILT = 'I) 매직1분VN - 필터'
+var GRP_MAGIC_MOD  = 'I) 매직1분VN - 모디파이'
+var GRP_MAGIC_ALRT = 'I) 매직1분VN - 알림'
+
+magicColUp      = color.rgb(255, 207, 166)
+magicColDown    = color.rgb(65, 159, 236)
+magicColExitLong= color.rgb(255, 208, 166)
+magicColExitShort= color.rgb(70, 131, 180)
+magicColFluxPos = color.rgb(22, 155, 93)
+magicColFluxNeg = color.rgb(151, 5, 41)
+magicColEntryLong = color.rgb(17, 207, 119)
+magicColEntryShort = color.rgb(209, 22, 69)
+magicColSqueeze = color.rgb(255, 17, 0)
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ Section 1: 입력값                                                         ║
@@ -170,6 +186,58 @@ eodTime       = input.string('02:05', '청산 시간 (HH:MM)', group=GRP_HUD)
 // ─ 데모 테스트 로직 ───────────────────────────────────────────────────────
 useDemoLogic = input.bool(false, '데모 RSI 진입 로직 실행', group=GRP_DEMO)
 rsiLenDemo   = input.int(14, '데모 RSI 길이', group=GRP_DEMO, minval=1)
+
+atrLenSL = input.int(21, 'ATR 손절 길이', group=GRP_SL, minval=1, maxval=200)
+
+// ─ 매직1분VN 설정 ──────────────────────────────────────────────────────────
+magicShowMomentum = input.bool(true, '모멘텀 히스토그램 표시', group=GRP_MAGIC_OSC)
+magicMomLen       = input.int(12, 'Momentum Length', group=GRP_MAGIC_OSC, minval=5, maxval=100)
+magicSigLen       = input.int(3, 'Signal Length', group=GRP_MAGIC_OSC, minval=1, maxval=20)
+magicBbLen        = input.int(20, 'BB Length', group=GRP_MAGIC_OSC, minval=5, maxval=200)
+magicBbMult       = input.float(1.4, 'BB Multiplier', group=GRP_MAGIC_OSC, minval=0.1, maxval=5.0, step=0.1)
+magicKcLen        = input.int(18, 'KC Length (ATR)', group=GRP_MAGIC_OSC, minval=5, maxval=200)
+magicKcMult       = input.float(1.0, 'KC Multiplier', group=GRP_MAGIC_OSC, minval=0.1, maxval=5.0, step=0.1)
+
+magicShowFlux     = input.bool(true, '플럭스 시각화', group=GRP_MAGIC_FLUX)
+magicFluxLen      = input.int(14, 'Flux Length', group=GRP_MAGIC_FLUX, minval=5, maxval=100)
+magicFluxSmooth   = input.int(1, '플럭스 스무딩', group=GRP_MAGIC_FLUX, minval=1, maxval=50)
+magicUseHeikin    = input.bool(true, 'Heikin-Ashi 변환 사용', group=GRP_MAGIC_FLUX)
+
+magicExitOpposite = input.bool(true, '반대 신호 청산', group=GRP_MAGIC_EXIT)
+magicUseMomFade   = input.bool(false, '모멘텀 페이드 청산', group=GRP_MAGIC_EXIT)
+magicFadeMode     = input.string('VN', '페이드 모드', options=['VN', 'Legacy'], group=GRP_MAGIC_EXIT)
+magicUseAtrStop   = input.bool(true, 'ATR 손절 사용', group=GRP_MAGIC_EXIT)
+magicAtrStopMult  = input.float(1.5, 'ATR 손절 Mult', group=GRP_MAGIC_EXIT, minval=0.1, maxval=5.0, step=0.1)
+magicUseFixedStop = input.bool(false, '고정 % 손절', group=GRP_MAGIC_EXIT)
+magicFixedStopPct = input.float(0.8, '고정 손절 %', group=GRP_MAGIC_EXIT, minval=0.1, maxval=5.0, step=0.1)
+magicUseSwingStop = input.bool(false, '전고/전저 손절', group=GRP_MAGIC_EXIT)
+magicStopLookback = input.int(5, '전고/전저 탐색', group=GRP_MAGIC_EXIT, minval=2, maxval=50)
+magicUsePivotStop = input.bool(false, '피봇 손절', group=GRP_MAGIC_EXIT)
+magicPivotLen     = input.int(5, '피봇 길이', group=GRP_MAGIC_EXIT, minval=2, maxval=20)
+magicUseAtrTrail  = input.bool(false, 'ATR 트레일', group=GRP_MAGIC_EXIT)
+magicAtrTrailLen  = input.int(14, 'ATR 트레일 길이', group=GRP_MAGIC_EXIT, minval=1, maxval=200)
+magicAtrTrailMult = input.float(2.0, 'ATR 트레일 Mult', group=GRP_MAGIC_EXIT, minval=0.1, maxval=5.0, step=0.1)
+magicUseBreakeven = input.bool(false, '브레이크이븐 스탑', group=GRP_MAGIC_EXIT)
+magicBreakevenMult= input.float(1.0, '브레이크이븐 ATR Mult', group=GRP_MAGIC_EXIT, minval=0.1, maxval=5.0, step=0.1)
+magicUseTimeStop  = input.bool(false, '시간 손절', group=GRP_MAGIC_EXIT)
+magicMaxHoldBars  = input.int(0, '최대 보유 봉 수', group=GRP_MAGIC_EXIT, minval=0, maxval=200)
+
+magicUseHtfTrend    = input.bool(false, '상위 타임프레임 추세 필터', group=GRP_MAGIC_FILT)
+magicHtfTrendTf     = input.timeframe('240', '상위 타임프레임', group=GRP_MAGIC_FILT)
+magicHtfMaLen       = input.int(50, '상위봉 EMA Length', group=GRP_MAGIC_FILT, minval=5, maxval=400)
+magicUseRangeFilter = input.bool(false, '상위봉 레인지 필터', group=GRP_MAGIC_FILT)
+magicRangeTf        = input.timeframe('5', '레인지 측정 TF', group=GRP_MAGIC_FILT)
+magicRangeBars      = input.int(20, '레인지 측정 봉 수', group=GRP_MAGIC_FILT, minval=5, maxval=200)
+magicRangePercent   = input.float(1.0, '레인지 한계 (%)', group=GRP_MAGIC_FILT, minval=0.1, maxval=10.0, step=0.1)
+
+magicUseModFlux    = input.bool(false, '모디파이드 플럭스(DMI/ADX) 사용', group=GRP_MAGIC_MOD)
+magicUseModSqueeze = input.bool(false, '모디파이드 스퀴즈모멘텀(ATR) 사용', group=GRP_MAGIC_MOD)
+magicMomMaType     = input.string('기본', '모멘텀 신호선 타입', options=['기본', 'EMA', 'HMA'], group=GRP_MAGIC_MOD)
+
+magicAlertLongEntry  = input.string('{"action":"enter_long"}', '롱 진입', group=GRP_MAGIC_ALRT)
+magicAlertShortEntry = input.string('{"action":"enter_short"}', '숏 진입', group=GRP_MAGIC_ALRT)
+magicAlertExitLong   = input.string('{"action":"exit_long"}', '롱 청산', group=GRP_MAGIC_ALRT)
+magicAlertExitShort  = input.string('{"action":"exit_short"}', '숏 청산', group=GRP_MAGIC_ALRT)
 
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ Section 2: 코어 계산                                                      ║
@@ -346,6 +414,98 @@ vwap = ta.vwap
 vwapLong  = not useVWAPFilter or close >= vwap
 vwapShort = not useVWAPFilter or close <= vwap
 
+// ─ 매직1분VN 계산 ──────────────────────────────────────────────────────────
+magicHaClose = (open + high + low + close) / 4.0
+var float magicHaOpen = na
+magicHaOpen := na(magicHaOpen[1]) ? (open + close) / 2.0 : (magicHaOpen[1] + magicHaClose[1]) / 2.0
+magicHaHigh = math.max(high, math.max(magicHaOpen, magicHaClose))
+magicHaLow  = math.min(low,  math.min(magicHaOpen, magicHaClose))
+
+magicFluxHigh  = magicUseHeikin ? magicHaHigh : high
+magicFluxLow   = magicUseHeikin ? magicHaLow  : low
+magicFluxClose = magicUseHeikin ? magicHaClose : close
+magicPrevClose = nz(magicFluxClose[1], magicFluxClose)
+magicUpMove    = magicFluxHigh - nz(magicFluxHigh[1], magicFluxHigh)
+magicDownMove  = nz(magicFluxLow[1], magicFluxLow) - magicFluxLow
+magicTrRaw     = math.max(magicFluxHigh - magicFluxLow, math.max(math.abs(magicFluxHigh - magicPrevClose), math.abs(magicFluxLow - magicPrevClose)))
+magicTr        = ta.rma(magicTrRaw, magicFluxLen)
+magicUpRma     = ta.rma(math.max(magicUpMove, 0.0), magicFluxLen)
+magicDownRma   = ta.rma(math.max(magicDownMove, 0.0), magicFluxLen)
+magicTrSafe    = magicTr == 0.0 ? na : magicTr
+magicUp        = not na(magicTrSafe) ? magicUpRma / magicTrSafe : 0.0
+magicDn        = not na(magicTrSafe) ? magicDownRma / magicTrSafe : 0.0
+magicFluxDenom = magicUp + magicDn
+magicFluxRatio = magicFluxDenom != 0 ? (magicUp - magicDn) / magicFluxDenom : 0.0
+magicFluxHalf  = math.max(int(math.round(magicFluxLen / 2.0)), 1)
+magicFluxCore  = ta.rma(magicFluxRatio, magicFluxHalf) * 100.0
+magicFluxValOriginal = magicFluxSmooth > 1 ? ta.sma(magicFluxCore, magicFluxSmooth) : magicFluxCore
+
+magicPdi         = ta.plus_di(magicFluxLen)
+magicNdi         = ta.minus_di(magicFluxLen)
+magicDmiDenom    = magicPdi + magicNdi
+magicModFluxRatio= magicDmiDenom != 0 ? (magicPdi - magicNdi) / magicDmiDenom : 0.0
+magicModFluxCore = ta.rma(magicModFluxRatio, magicFluxHalf) * 100.0
+magicModFluxVal  = magicFluxSmooth > 1 ? ta.sma(magicModFluxCore, magicFluxSmooth) : magicModFluxCore
+
+magicFluxVal = magicUseModFlux ? magicModFluxVal : magicFluxValOriginal
+
+magicBbBasis = ta.sma(close, magicBbLen)
+magicBbDev   = ta.stdev(close, magicBbLen) * magicBbMult
+magicKcRange = ta.atr(magicKcLen) * magicKcMult
+magicSqueezeOn = magicBbDev < magicKcRange
+
+magicHl2       = (high + low) / 2.0
+magicKcBasis   = ta.sma(magicHl2, magicKcLen)
+magicKcUpper   = magicKcBasis + magicKcRange
+magicKcLower   = magicKcBasis - magicKcRange
+magicKcAverage = (magicKcUpper + magicKcLower) / 2.0
+magicMidline   = math.avg(magicHl2, magicKcAverage)
+magicAtrPrim   = ta.atr(magicKcLen)
+
+magicNormOriginal = (close - magicMidline)
+magicNormMod      = magicAtrPrim > 0 ? (close - magicMidline) / magicAtrPrim : 0.0
+magicNormSel      = magicUseModSqueeze ? magicNormMod : magicNormOriginal
+magicMomentum     = ta.linreg(magicNormSel * 100.0, magicMomLen, 0)
+
+magicMomSignal = magicMomMaType == 'EMA' ?
+     ta.ema(magicMomentum, magicSigLen) : magicMomMaType == 'HMA' ?
+     ta.hma(magicMomentum, magicSigLen) :
+     ta.sma(magicMomentum, magicSigLen)
+
+magicFadeWindow = 1
+magicFadeMagnitudeDown = ta.falling(math.abs(magicMomentum), magicFadeWindow)
+magicFadeLongVN  = magicMomentum > 0 and magicFadeMagnitudeDown
+magicFadeShortVN = magicMomentum < 0 and magicFadeMagnitudeDown
+magicFadeLongLegacy  = magicMomentum > 0 and magicMomentum <= nz(magicMomentum[1], magicMomentum)
+magicFadeShortLegacy = magicMomentum < 0 and magicMomentum >= nz(magicMomentum[1], magicMomentum)
+magicFadeLong  = magicFadeMode == 'VN' ? magicFadeLongVN  : magicFadeLongLegacy
+magicFadeShort = magicFadeMode == 'VN' ? magicFadeShortVN : magicFadeShortLegacy
+
+magicHtfMa      = na
+magicHtfTrendUp = false
+magicHtfTrendDn = false
+if magicUseHtfTrend
+    magicHtfMa      := request.security(syminfo.tickerid, magicHtfTrendTf, ta.ema(close, magicHtfMaLen), lookahead=barmerge.lookahead_off)
+    magicHtfTrendUp := close > magicHtfMa
+    magicHtfTrendDn := close < magicHtfMa
+
+magicRangeHigh = na
+magicRangeLow  = na
+magicRangePerc = na
+magicInRange   = false
+if magicUseRangeFilter
+    magicRangeHigh := request.security(syminfo.tickerid, magicRangeTf, ta.highest(high, magicRangeBars), lookahead=barmerge.lookahead_off)
+    magicRangeLow  := request.security(syminfo.tickerid, magicRangeTf, ta.lowest(low, magicRangeBars),  lookahead=barmerge.lookahead_off)
+    magicRangePerc := magicRangeLow != 0 ? (magicRangeHigh - magicRangeLow) / magicRangeLow * 100.0 : 0.0
+    magicInRange   := magicRangePerc <= magicRangePercent
+
+magicPivotLow  = ta.valuewhen(not na(ta.pivotlow(low, magicPivotLen, magicPivotLen)), ta.pivotlow(low, magicPivotLen, magicPivotLen), 0)
+magicPivotHigh = ta.valuewhen(not na(ta.pivothigh(high, magicPivotLen, magicPivotLen)), ta.pivothigh(high, magicPivotLen, magicPivotLen), 0)
+magicSwingLow  = ta.lowest(low, magicStopLookback)
+magicSwingHigh = ta.highest(high, magicStopLookback)
+magicAtrBase      = ta.atr(magicMomLen)
+magicAtrTrailBase = ta.atr(magicAtrTrailLen)
+
 // ─ 수량 계산 헬퍼 ──────────────────────────────────────────────────────────
 calcNotionalQty() =>
     baseEquity = tradableCapital
@@ -368,6 +528,156 @@ calcPositionQty(stopDistance) =>
 
 // ─ 거래 허용 여부 ─────────────────────────────────────────────────────────
 
+avgVolume = ta.sma(volume, volumeLookback)
+volumeOK = not useVolumeFilter or volume >= nz(avgVolume, volume) * volumeMultiplier
+rsiBiasLong = not useRSIShift or htfRsi >= rsiBullBand
+rsiBiasShort = not useRSIShift or htfRsi <= rsiBearBand
+
+equitySlopeNow = ta.linreg(strategy.equity, eqSlopeLen, 0)
+equitySlopePrev = ta.linreg(strategy.equity[eqSlopeLen], eqSlopeLen, 0)
+equitySlopeOK = not useEquitySlopeFilter or na(equitySlopeNow) or na(equitySlopePrev) or equitySlopeNow >= equitySlopePrev
+
+candleOK = true
+chochOK_L = true
+chochOK_S = true
+
+isTimeAllowed = isBacktestWindow and sessionAllowed and kstAllowed
+haltReasons = isGuardHalted or stop_by_losses or stop_by_dd or stop_by_guard or stop_by_capital or stop_by_streak or stop_by_perf or stop_by_profit or isCapitalBreached or not isVolatilityOK
+canTrade = isTimeAllowed and not haltReasons
+
+momOK_L = magicMomentum < 0 and magicFluxVal > 0
+momOK_S = magicMomentum > 0 and magicFluxVal < 0
+
+contextLongOK = canTrade and htfLong and microTrendLong and trendBiasLongOK and confBiasLongOK and slopeOK_L and rangeOK and vwapLong and rsiBiasLong and volumeOK and equitySlopeOK
+contextShortOK = canTrade and htfShort and microTrendShort and trendBiasShortOK and confBiasShortOK and slopeOK_S and rangeOK and vwapShort and rsiBiasShort and volumeOK and equitySlopeOK
+
+magicLongSignal  = ta.crossover(magicMomentum, magicMomSignal) and magicMomentum < 0 and magicFluxVal > 0
+magicShortSignal = ta.crossunder(magicMomentum, magicMomSignal) and magicMomentum > 0 and magicFluxVal < 0
+
+magicLongFilterOk  = (not magicUseHtfTrend or magicHtfTrendUp)   and (not magicUseRangeFilter or not magicInRange)
+magicShortFilterOk = (not magicUseHtfTrend or magicHtfTrendDn)   and (not magicUseRangeFilter or not magicInRange)
+
+enterLong  = magicLongSignal  and contextLongOK and magicLongFilterOk
+enterShort = magicShortSignal and contextShortOK and magicShortFilterOk
+
+exitLongOpposite  = magicExitOpposite and magicShortSignal
+exitShortOpposite = magicExitOpposite and magicLongSignal
+exitLongFade      = magicUseMomFade and magicFadeLong
+exitShortFade     = magicUseMomFade and magicFadeShort
+
+// ─ 매직1분VN 진입/청산 ──────────────────────────────────────────────────────
+pivLowCache = magicPivotLow
+pivHighCache = magicPivotHigh
+usePivotSL = magicUsePivotStop
+
+calcInitialLongStop(entryPrice) =>
+    float stop = na
+    if magicUseSwingStop and not na(magicSwingLow)
+        stop := na(stop) ? magicSwingLow : math.max(stop, magicSwingLow)
+    if magicUsePivotStop and not na(magicPivotLow)
+        stop := na(stop) ? magicPivotLow : math.max(stop, magicPivotLow)
+    if magicUseFixedStop
+        fixedStop = entryPrice * (1 - magicFixedStopPct / 100.0)
+        stop := na(stop) ? fixedStop : math.max(stop, fixedStop)
+    if magicUseAtrStop and not na(magicAtrBase)
+        atrStopVal = entryPrice - magicAtrBase * magicAtrStopMult
+        stop := na(stop) ? atrStopVal : math.max(stop, atrStopVal)
+    if not na(stop)
+        stop := math.min(stop, entryPrice - tickSize)
+    stop
+
+calcInitialShortStop(entryPrice) =>
+    float stop = na
+    if magicUseSwingStop and not na(magicSwingHigh)
+        stop := na(stop) ? magicSwingHigh : math.min(stop, magicSwingHigh)
+    if magicUsePivotStop and not na(magicPivotHigh)
+        stop := na(stop) ? magicPivotHigh : math.min(stop, magicPivotHigh)
+    if magicUseFixedStop
+        fixedStop = entryPrice * (1 + magicFixedStopPct / 100.0)
+        stop := na(stop) ? fixedStop : math.min(stop, fixedStop)
+    if magicUseAtrStop and not na(magicAtrBase)
+        atrStopVal = entryPrice + magicAtrBase * magicAtrStopMult
+        stop := na(stop) ? atrStopVal : math.min(stop, atrStopVal)
+    if not na(stop)
+        stop := math.max(stop, entryPrice + tickSize)
+    stop
+
+calcActiveLongStop(entryPrice, highestPrice) =>
+    stop = calcInitialLongStop(entryPrice)
+    if magicUseBreakeven and not na(highestPrice) and not na(magicAtrTrailBase)
+        if (highestPrice - entryPrice) >= magicAtrTrailBase * magicBreakevenMult
+            stop := na(stop) ? entryPrice : math.max(stop, entryPrice)
+    if magicUseAtrTrail and not na(highestPrice) and not na(magicAtrTrailBase)
+        trailStop = highestPrice - magicAtrTrailMult * magicAtrTrailBase
+        stop := na(stop) ? trailStop : math.max(stop, trailStop)
+    if not na(stop)
+        stop := math.min(stop, entryPrice)
+    stop
+
+calcActiveShortStop(entryPrice, lowestPrice) =>
+    stop = calcInitialShortStop(entryPrice)
+    if magicUseBreakeven and not na(lowestPrice) and not na(magicAtrTrailBase)
+        if (entryPrice - lowestPrice) >= magicAtrTrailBase * magicBreakevenMult
+            stop := na(stop) ? entryPrice : math.min(stop, entryPrice)
+    if magicUseAtrTrail and not na(lowestPrice) and not na(magicAtrTrailBase)
+        trailStop = lowestPrice + magicAtrTrailMult * magicAtrTrailBase
+        stop := na(stop) ? trailStop : math.min(stop, trailStop)
+    if not na(stop)
+        stop := math.max(stop, entryPrice)
+    stop
+
+var float magicHighestSinceEntry = na
+var float magicLowestSinceEntry  = na
+var int   magicHoldBars          = 0
+
+if barstate.isconfirmed
+    if strategy.position_size == 0
+        magicHoldBars := 0
+        magicHighestSinceEntry := na
+        magicLowestSinceEntry := na
+        strategy.cancel('LongStop')
+        strategy.cancel('ShortStop')
+        if enterLong
+            entryPrice = close
+            initialStop = calcInitialLongStop(entryPrice)
+            stopDistance = na(initialStop) ? na : entryPrice - initialStop
+            qty = calcPositionQty(stopDistance)
+            if qty > 0
+                strategy.entry('Long', strategy.long, qty=qty, alert_message=magicAlertLongEntry)
+        if enterShort
+            entryPrice = close
+            initialStop = calcInitialShortStop(entryPrice)
+            stopDistance = na(initialStop) ? na : initialStop - entryPrice
+            qty = calcPositionQty(stopDistance)
+            if qty > 0
+                strategy.entry('Short', strategy.short, qty=qty, alert_message=magicAlertShortEntry)
+    else
+        magicHoldBars += 1
+        if strategy.position_size > 0
+            magicHighestSinceEntry := na(magicHighestSinceEntry) ? high : math.max(magicHighestSinceEntry, high)
+            activeStop = calcActiveLongStop(strategy.position_avg_price, magicHighestSinceEntry)
+            if not na(activeStop)
+                stopWithSlip = math.max(activeStop - slipBuffer, 0.0)
+                strategy.exit('LongStop', from_entry='Long', stop=stopWithSlip, alert_message=magicAlertExitLong)
+            else
+                strategy.cancel('LongStop')
+            if magicUseTimeStop and magicMaxHoldBars > 0 and magicHoldBars >= magicMaxHoldBars
+                strategy.close('Long', alert_message=magicAlertExitLong)
+            else if exitLongOpposite or (exitLongFade and magicHoldBars >= 1)
+                strategy.close('Long', alert_message=magicAlertExitLong)
+        else if strategy.position_size < 0
+            magicLowestSinceEntry := na(magicLowestSinceEntry) ? low : math.min(magicLowestSinceEntry, low)
+            activeStop = calcActiveShortStop(strategy.position_avg_price, magicLowestSinceEntry)
+            if not na(activeStop)
+                stopWithSlip = activeStop + slipBuffer
+                strategy.exit('ShortStop', from_entry='Short', stop=stopWithSlip, alert_message=magicAlertExitShort)
+            else
+                strategy.cancel('ShortStop')
+            if magicUseTimeStop and magicMaxHoldBars > 0 and magicHoldBars >= magicMaxHoldBars
+                strategy.close('Short', alert_message=magicAlertExitShort)
+            else if exitShortOpposite or (exitShortFade and magicHoldBars >= 1)
+                strategy.close('Short', alert_message=magicAlertExitShort)
+
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ Section 3: 데모 전략 (옵션)                                              ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
@@ -382,6 +692,21 @@ if eodClose and strategy.position_size != 0
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ Section 4: 시각화                                                         ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
+
+hline(0, 'Zero', color=color.new(color.white, 80), linestyle=hline.style_dashed)
+plot(magicShowMomentum ? magicMomentum : na, 'Momentum', color=magicMomentum >= 0 ? magicColUp : magicColDown, style=plot.style_columns)
+plot(magicShowMomentum ? magicMomSignal : na, 'Momentum Signal', color=color.new(color.white, 0))
+plot(magicShowFlux ? magicFluxVal : na, 'Directional Flux', color=magicFluxVal >= 0 ? magicColFluxPos : magicColFluxNeg)
+plotshape(enterLong, title='Long Entry', style=shape.triangleup, location=location.belowbar, color=magicColEntryLong, size=size.tiny)
+plotshape(enterShort, title='Short Entry', style=shape.triangledown, location=location.abovebar, color=magicColEntryShort, size=size.tiny)
+plotshape(exitLongOpposite or exitLongFade, title='Long Exit', style=shape.circle, location=location.abovebar, color=magicColExitLong, size=size.tiny)
+plotshape(exitShortOpposite or exitShortFade, title='Short Exit', style=shape.circle, location=location.belowbar, color=magicColExitShort, size=size.tiny)
+barcolor(magicSqueezeOn ? color.new(magicColSqueeze, 70) : na)
+
+alertcondition(enterLong, 'Enter Long', magicAlertLongEntry)
+alertcondition(enterShort, 'Enter Short', magicAlertShortEntry)
+alertcondition(exitLongOpposite or exitLongFade, 'Exit Long', magicAlertExitLong)
+alertcondition(exitShortOpposite or exitShortFade, 'Exit Short', magicAlertExitShort)
 
 plot(useMicroTrend ? emaFast : na, 'EMA 빠른선', color=color.new(color.aqua, 0))
 plot(useMicroTrend ? emaSlow : na, 'EMA 느린선', color=color.new(color.orange, 0))
