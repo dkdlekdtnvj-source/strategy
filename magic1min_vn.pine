@@ -108,6 +108,10 @@ distanceAtrLen    = input.int(21, 'ATR 길이', minval=1, group=GRP_FILTER)
 distanceTrendLen  = input.int(55, '추세 EMA 길이', minval=1, group=GRP_FILTER)
 distanceMaxAtr    = input.float(2.4, '최대 ATR 배수', minval=0.1, group=GRP_FILTER)
 
+useDisparityGuard = input.bool(false, 'Disparity Index 필터', group=GRP_FILTER)
+disparityLen      = input.int(34, 'Disparity 길이', minval=1, group=GRP_FILTER)
+disparityMaxPct   = input.float(6.0, 'Disparity 한계 %', minval=0.0, group=GRP_FILTER)
+
 useEquitySlope    = input.bool(false, '자산 기울기 필터', group=GRP_FILTER)
 eqSlopeLen        = input.int(120, '자산 기울기 룩백', minval=2, group=GRP_FILTER)
 
@@ -249,12 +253,18 @@ simpleMetricsOnly   = input.bool(false, '심플 메트릭 (Python)', group=GRP_M
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 내부 유틸 함수 (Python 헬퍼 포팅)
-float nzf(float value, float replacement) => na(value) ? replacement : value
+series float nzf(series float value, series float replacement) => na(value) ? replacement : value
 float maxIgnoreNaN(float a, float b) => na(a) ? b : na(b) ? a : math.max(a, b)
 float minIgnoreNaN(float a, float b) => na(a) ? b : na(b) ? a : math.min(a, b)
 float trueRange() => math.max(math.max(high - low, math.abs(high - close[1])), math.abs(low - close[1]))
 float atrSeries(int len) => ta.rma(trueRange(), len)
 float stdSeries(series float src, int len) => ta.stdev(src, len)
+
+series float disparityIndex(series float src, int len) =>
+    float emaBase = ta.ema(src, len)
+    float diff = ta.wma(math.abs(src - emaBase), len)
+    float denom = math.abs(emaBase)
+    denom == 0 or na(denom) ? 0.0 : diff / denom * 100.0
 stochRsi(src, len) =>
     float rsiVal = ta.rsi(src, len)
     float lowest = ta.lowest(rsiVal, len)
@@ -437,6 +447,9 @@ if useDistanceGuard
     float trendMa = ta.ema(close, distanceTrendLen)
     float trendDistance = distanceAtr != 0 ? math.abs(close - trendMa) / distanceAtr : 0
     distanceOk := vwDistance <= distanceMaxAtr and trendDistance <= distanceMaxAtr
+
+float disparityPct = useDisparityGuard ? disparityIndex(close, disparityLen) : 0.0
+bool disparityOk = not useDisparityGuard or disparityPct <= disparityMaxPct
 
 float kasaRsiVal = useKasa ? ta.rsi(close, kasaRsiLen) : 50
 
@@ -661,6 +674,9 @@ if useSlopeFilter
 if useDistanceGuard
     longOk := longOk and distanceOk
     shortOk := shortOk and distanceOk
+if useDisparityGuard
+    longOk := longOk and disparityOk
+    shortOk := shortOk and disparityOk
 if useEquitySlope and bar_index > eqSlopeLen
     float eqSlopeVal = ta.linreg(strategy.closedprofit, math.min(eqSlopeLen, bar_index + 1), 0)
     longOk := longOk and eqSlopeVal >= 0
