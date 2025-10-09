@@ -159,6 +159,15 @@ rsiBearBand     = input.float(48, 'RSI 약세 기준', minval=30, maxval=60, ste
 useEquitySlopeFilter = input.bool(true, '순자산 기울기 필터', group=GRP_FILTER)
 eqSlopeLen      = input.int(120, '순자산 기울기 길이', minval=20, maxval=500, group=GRP_FILTER)
 
+// ─ 손절 & 유틸 ────────────────────────────────────────────────────────────
+useAtrStopCalc     = input.bool(true, 'ATR 손절 거리 계산', group=GRP_SL)
+atrLenSL           = input.int(14, 'ATR 손절 ATR 길이', minval=1, group=GRP_SL)
+atrMultSL          = input.float(1.8, 'ATR 손절 배수', minval=0.1, step=0.1, group=GRP_SL)
+useFixedStopLevels = input.bool(true, '전고/전저 고정 손절 사용', group=GRP_SL)
+fixedStopLookback  = input.int(20, '전고/전저 룩백 봉수', minval=1, group=GRP_SL)
+fixedStopBufferTicks = input.int(0, '추가 버퍼 (틱)', minval=0, group=GRP_SL)
+showFixedStopHud   = input.bool(true, 'HUD에 전고/전저 손절 표시', group=GRP_SL)
+
 // ─ HUD & 디버거 ────────────────────────────────────────────────────────────
 showHUD       = input.bool(true, 'HUD 표시', group=GRP_HUD)
 showDebugger  = input.bool(true, '디버거 표시', group=GRP_HUD)
@@ -179,6 +188,7 @@ rsiLenDemo   = input.int(14, '데모 RSI 길이', group=GRP_DEMO, minval=1)
 isBacktestWindow = time >= startTs
 sessionAllowed   = not useSessionFilter or not na(time(timeframe.period, primarySession))
 kstAllowed       = not useKstSession or not na(time(timeframe.period, kstSession, 'Asia/Seoul'))
+isTimeAllowed    = isBacktestWindow and sessionAllowed and kstAllowed
 
 // ─ 월렛 & 자본 추적 ────────────────────────────────────────────────────────
 var float tradableCapital = strategy.initial_capital
@@ -227,6 +237,21 @@ finalRiskPct  = scaledRiskPct * perfRiskMult
 
 parStateLabel = not usePerfAdaptiveRisk ? 'OFF' : isHotStreak ? 'HOT' : isColdStreak ? 'COLD' : 'NEUTRAL'
 parWinLabel   = na(recentWinRate) ? '-' : str.tostring(recentWinRate, '##.##') + '%'
+
+// ─ 손절 계산 ───────────────────────────────────────────────────────────────
+float atrStopDistance = useAtrStopCalc ? ta.atr(atrLenSL) * atrMultSL : na
+float fixedStopBuffer = fixedStopBufferTicks * tickSize
+float fixedLowRaw     = ta.lowest(low, fixedStopLookback)[1]
+float fixedHighRaw    = ta.highest(high, fixedStopLookback)[1]
+float fixedStopLongPrice  = useFixedStopLevels and not na(fixedLowRaw) ? math.max(fixedLowRaw - fixedStopBuffer, 0) : na
+float fixedStopShortPrice = useFixedStopLevels and not na(fixedHighRaw) ? fixedHighRaw + fixedStopBuffer : na
+float fixedStopLongDist   = not na(fixedStopLongPrice) ? close - fixedStopLongPrice : na
+float fixedStopShortDist  = not na(fixedStopShortPrice) ? fixedStopShortPrice - close : na
+float fixedStopLongPct    = not na(fixedStopLongDist) and close != 0 ? fixedStopLongDist / close * 100.0 : na
+float fixedStopShortPct   = not na(fixedStopShortDist) and close != 0 ? fixedStopShortDist / close * 100.0 : na
+bool  fixedStopLongValid  = not na(fixedStopLongDist) and fixedStopLongDist > 0
+bool  fixedStopShortValid = not na(fixedStopShortDist) and fixedStopShortDist > 0
+bool  fixedStopReady      = useFixedStopLevels and fixedStopLongValid and fixedStopShortValid
 
 // ─ 가드 변수 ───────────────────────────────────────────────────────────────
 useVolGuardRange(float atrPctVal) => not useVolatilityGuard or (atrPctVal >= volatilityLowerPct and atrPctVal <= volatilityUpperPct)
@@ -323,6 +348,13 @@ trendBiasShortOK = not useTrendBias or close < maTrend
 confBiasLongOK   = not useConfBias or close > maConf
 confBiasShortOK  = not useConfBias or close < maConf
 
+volumeSma = ta.sma(volume, volumeLookback)
+volumeOK  = not useVolumeFilter or nz(volume) >= nz(volumeSma) * volumeMultiplier
+
+distanceAtr      = ta.atr(distanceAtrLen)
+distanceFromMean = distanceAtr > 0 ? math.abs(close - maTrend) / distanceAtr : 0.0
+distanceOK       = not useDistanceGuard or distanceFromMean <= distanceMaxAtr
+
 prevTrend = nz(maTrend[slopeLookback], maTrend)
 slopePct  = maTrend != 0 ? (maTrend - prevTrend) / maTrend * 100.0 : 0.0
 slopeOK_L = not useSlopeFilter or slopePct >= slopeMinPct
@@ -346,7 +378,19 @@ vwap = ta.vwap
 vwapLong  = not useVWAPFilter or close >= vwap
 vwapShort = not useVWAPFilter or close <= vwap
 
+momOK_L = not useRSIShift or htfRsi >= rsiBullBand
+momOK_S = not useRSIShift or htfRsi <= rsiBearBand
+chochOK_L = true
+chochOK_S = true
+candleOK  = distanceOK
+
 // ─ 수량 계산 헬퍼 ──────────────────────────────────────────────────────────
+contextLongOK  = isTimeAllowed and rangeOK and distanceOK and vwapLong and microTrendLong and trendBiasLongOK and confBiasLongOK and slopeOK_L and htfLong and momOK_L and volumeOK and isVolatilityOK
+contextShortOK = isTimeAllowed and rangeOK and distanceOK and vwapShort and microTrendShort and trendBiasShortOK and confBiasShortOK and slopeOK_S and htfShort and momOK_S and volumeOK and isVolatilityOK
+
+haltReasons = not isTimeAllowed or isGuardHalted or stop_by_losses or stop_by_dd or stop_by_guard or stop_by_capital or stop_by_streak or stop_by_perf or stop_by_profit or isCapitalBreached or (useVolatilityGuard and not isVolatilityOK) or (useVolumeFilter and not volumeOK)
+canTrade    = not haltReasons
+
 calcNotionalQty() =>
     baseEquity = tradableCapital
     sizeUsd = notionalSizingType == 'Fixed USD' ? notionalSizingValue : baseEquity * (notionalSizingValue / 100.0)
@@ -368,6 +412,14 @@ calcPositionQty(stopDistance) =>
 
 // ─ 거래 허용 여부 ─────────────────────────────────────────────────────────
 
+fixedStopLongPctStr  = not na(fixedStopLongPct) ? str.tostring(fixedStopLongPct, '#.##') + '%' : 'NA'
+fixedStopShortPctStr = not na(fixedStopShortPct) ? str.tostring(fixedStopShortPct, '#.##') + '%' : 'NA'
+fixedStopLongLabel = fixedStopReady ? 'L: ' + str.tostring(fixedStopLongPrice, format.mintick) + ' (Δ' + str.tostring(fixedStopLongDist, format.mintick) + ' | ' + fixedStopLongPctStr + ')' : ''
+fixedStopShortLabel = fixedStopReady ? 'S: ' + str.tostring(fixedStopShortPrice, format.mintick) + ' (Δ' + str.tostring(fixedStopShortDist, format.mintick) + ' | ' + fixedStopShortPctStr + ')' : ''
+fixedStopText = not useFixedStopLevels ? 'OFF' : fixedStopReady ? fixedStopLongLabel + ' / ' + fixedStopShortLabel : '데이터 부족'
+fixedStopColor = not useFixedStopLevels ? color.gray : fixedStopReady ? color.aqua : color.red
+fixedStopBg    = not useFixedStopLevels ? color.new(color.gray, 80) : fixedStopReady ? color.new(color.aqua, 85) : color.new(color.red, 85)
+
 // ╔══════════════════════════════════════════════════════════════════════════╗
 // ║ Section 3: 데모 전략 (옵션)                                              ║
 // ╚══════════════════════════════════════════════════════════════════════════╝
@@ -385,8 +437,8 @@ if eodClose and strategy.position_size != 0
 
 plot(useMicroTrend ? emaFast : na, 'EMA 빠른선', color=color.new(color.aqua, 0))
 plot(useMicroTrend ? emaSlow : na, 'EMA 느린선', color=color.new(color.orange, 0))
-plot(usePivotSL ? pivLowCache : na, 'Pivot SL Long', color=color.new(color.red, 0), style=plot.style_linebr)
-plot(usePivotSL ? pivHighCache : na, 'Pivot SL Short', color=color.new(color.red, 0), style=plot.style_linebr)
+plot(useFixedStopLevels ? fixedStopLongPrice : na, '고정 손절 롱', color=color.new(color.red, 0), style=plot.style_linebr)
+plot(useFixedStopLevels ? fixedStopShortPrice : na, '고정 손절 숏', color=color.new(color.red, 0), style=plot.style_linebr)
 plot(useVWAPFilter ? vwap : na, 'VWAP', color=color.new(color.yellow, 40))
 
 // ─ HUD ─────────────────────────────────────────────────────────────────────
@@ -399,7 +451,7 @@ if showHUD and barstate.islast
         'Bottom Left' => position.bottom_left
         'Bottom Right' => position.bottom_right
 
-    var table hud = table.new(posMap, 2, 13, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
+    var table hud = table.new(posMap, 2, 14, bgcolor=color.new(color.black, 40), border_width=1, border_color=color.gray)
     f_str(val) => str.tostring(val, format.mintick)
 
     table.cell(hud, 0, 0, 'KCAS Base HUD', text_color=color.white, bgcolor=color.new(color.purple, 20))
@@ -450,9 +502,16 @@ if showHUD and barstate.islast
     table.cell(hud, 0, 11, '연패 상태', text_color=color.white)
     table.cell(hud, 1, 11, str.tostring(lossStreak) + '/' + str.tostring(maxConsecutiveLosses), text_color=stop_by_streak ? color.red : color.white)
 
+    if showFixedStopHud
+        table.cell(hud, 0, 12, '전저/전고 손절', text_color=color.white)
+        table.cell(hud, 1, 12, fixedStopText, text_color=fixedStopColor, bgcolor=fixedStopBg)
+    else
+        table.cell(hud, 0, 12, '', text_color=color.white, bgcolor=color.new(color.black, 100))
+        table.cell(hud, 1, 12, '', text_color=color.white, bgcolor=color.new(color.black, 100))
+
     parColor = not usePerfAdaptiveRisk ? color.gray : isHotStreak ? color.new(color.orange, 20) : isColdStreak ? color.new(color.blue, 20) : color.new(color.silver, 40)
-    table.cell(hud, 0, 12, 'PAR 상태', text_color=color.white)
-    table.cell(hud, 1, 12, parStateLabel + ' / ' + parWinLabel + ' / ' + str.tostring(finalRiskPct, '#.##') + '%', text_color=color.white, bgcolor=parColor)
+    table.cell(hud, 0, 13, 'PAR 상태', text_color=color.white)
+    table.cell(hud, 1, 13, parStateLabel + ' / ' + parWinLabel + ' / ' + str.tostring(finalRiskPct, '#.##') + '%', text_color=color.white, bgcolor=parColor)
 
 // ─ 디버거 ──────────────────────────────────────────────────────────────────
 f_cell(tbl, c, r, txt, ok) =>
@@ -508,12 +567,24 @@ var float  MODULE_tradableCapital = na
 var float  MODULE_finalRiskPct = na
 var bool   MODULE_contextLongOK = na
 var bool   MODULE_contextShortOK = na
+var float  MODULE_atrStopDistance = na
+var float  MODULE_fixedStopLongPrice = na
+var float  MODULE_fixedStopShortPrice = na
+var float  MODULE_fixedStopLongDist = na
+var float  MODULE_fixedStopShortDist = na
+var bool   MODULE_fixedStopReady = na
 
 MODULE_canTrade := canTrade
 MODULE_tradableCapital := tradableCapital
 MODULE_finalRiskPct := finalRiskPct
 MODULE_contextLongOK := contextLongOK
 MODULE_contextShortOK := contextShortOK
+MODULE_atrStopDistance := atrStopDistance
+MODULE_fixedStopLongPrice := fixedStopLongPrice
+MODULE_fixedStopShortPrice := fixedStopShortPrice
+MODULE_fixedStopLongDist := fixedStopLongDist
+MODULE_fixedStopShortDist := fixedStopShortDist
+MODULE_fixedStopReady := fixedStopReady
 
 // 유틸 함수 export용 (pine은 직접 반환 불가하지만, 전략에서 복사해 사용 권장)
 // calcPositionQty(stopDistance) 함수와 kasia_guard_price(entryPrice, direction, qty) 함수를 활용하세요.
