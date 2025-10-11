@@ -27,7 +27,7 @@ strategy('KASIA Base Module v3.0 (KCAS Upgrade)',
          process_orders_on_close=true,
          pyramiding=0,
          calc_on_every_tick=true,
-         calc_on_order_fills=true,
+         
          max_lines_count=500,
          max_labels_count=500)
 
